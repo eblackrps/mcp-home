@@ -70,9 +70,271 @@ import { auditToolCall, log, summarizeArgs } from "./logger.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
 
+type CommandCatalogEntry = {
+  name: string;
+  summary: string;
+  options?: string[];
+  example?: string;
+};
+
+const DOCKER_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "get_docker_status",
+    summary: "High-level Docker Desktop summary with running containers, problems, image count, and network count.",
+    example: "get_docker_status"
+  },
+  {
+    name: "list_docker_containers",
+    summary: "List containers with optional name and state filters.",
+    options: ["name", "state", "limit"],
+    example: "list_docker_containers state=running"
+  },
+  {
+    name: "get_docker_projects",
+    summary: "Summarize Docker Compose projects and their container states.",
+    options: ["project", "limit"],
+    example: "get_docker_projects"
+  },
+  {
+    name: "get_docker_project_details",
+    summary: "Inspect one Docker Compose project with services, ports, usage, networks, and mounts.",
+    options: ["project"],
+    example: "get_docker_project_details project=mcphome"
+  },
+  {
+    name: "get_docker_compose_health",
+    summary: "Show per-project compose health and flag problem containers.",
+    options: ["project", "limit"],
+    example: "get_docker_compose_health"
+  },
+  {
+    name: "get_docker_issues",
+    summary: "List unhealthy, restarting, dead, or non-zero exited containers.",
+    options: ["limit"],
+    example: "get_docker_issues"
+  },
+  {
+    name: "get_docker_container_details",
+    summary: "Inspect one container with command, ports, mounts, usage, exit code, and restart count.",
+    options: ["name"],
+    example: "get_docker_container_details name=mcp-home"
+  },
+  {
+    name: "get_docker_resource_usage",
+    summary: "Show live CPU, memory, network, block I/O, and PID usage for running containers.",
+    options: ["name", "project", "limit"],
+    example: "get_docker_resource_usage project=mcphome"
+  },
+  {
+    name: "get_docker_recent_activity",
+    summary: "List recently started, finished, or created containers.",
+    options: ["state", "sinceHours", "limit"],
+    example: "get_docker_recent_activity sinceHours=168"
+  },
+  {
+    name: "list_docker_images",
+    summary: "List Docker images with optional repository and dangling filters.",
+    options: ["repository", "dangling", "limit"],
+    example: "list_docker_images dangling=true"
+  },
+  {
+    name: "list_docker_networks",
+    summary: "List Docker networks with an optional name filter.",
+    options: ["name", "limit"],
+    example: "list_docker_networks"
+  },
+  {
+    name: "list_docker_volumes",
+    summary: "List Docker volumes and whether they are anonymous or currently in use.",
+    options: ["name", "inUse", "anonymous", "limit"],
+    example: "list_docker_volumes inUse=false"
+  },
+  {
+    name: "get_docker_cleanup_candidates",
+    summary: "Summarize reclaimable Docker storage plus exited containers, unused images, and unused volumes.",
+    options: ["olderThanHours", "limit"],
+    example: "get_docker_cleanup_candidates olderThanHours=72"
+  }
+];
+
+const PLEX_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "get_plex_status",
+    summary: "High-level Plex server and library summary.",
+    example: "get_plex_status"
+  },
+  {
+    name: "get_plex_server_activity",
+    summary: "Current Plex activity snapshot including active sessions and latest watched items.",
+    example: "get_plex_server_activity"
+  },
+  {
+    name: "get_plex_now_playing",
+    summary: "Active Plex playback sessions.",
+    example: "get_plex_now_playing"
+  },
+  {
+    name: "get_plex_recently_watched",
+    summary: "Recently watched Plex items from the local activity snapshot.",
+    options: ["limit"],
+    example: "get_plex_recently_watched limit=5"
+  },
+  {
+    name: "get_plex_continue_watching",
+    summary: "Plex continue-watching recommendations.",
+    options: ["limit"],
+    example: "get_plex_continue_watching limit=5"
+  },
+  {
+    name: "get_plex_on_deck",
+    summary: "Plex on-deck recommendations for what is next.",
+    options: ["limit"],
+    example: "get_plex_on_deck limit=5"
+  },
+  {
+    name: "find_plex_unwatched",
+    summary: "Find unwatched movies or shows, optionally filtered by title or section.",
+    options: ["query", "mediaType", "section", "limit"],
+    example: "find_plex_unwatched mediaType=movie"
+  },
+  {
+    name: "list_plex_sections",
+    summary: "List the available Plex library sections.",
+    example: "list_plex_sections"
+  },
+  {
+    name: "search_plex_library",
+    summary: "Search the whole Plex library index by title, section, or item type.",
+    options: ["query", "section", "itemType", "limit"],
+    example: "search_plex_library query=Daredevil itemType=episode"
+  },
+  {
+    name: "search_plex_titles",
+    summary: "Search titles specifically within movies, TV, or audio.",
+    options: ["query", "mediaType", "limit"],
+    example: "search_plex_titles query=star mediaType=movie"
+  },
+  {
+    name: "get_plex_item_details",
+    summary: "Get detailed matches for a specific title.",
+    options: ["title", "itemType", "section", "limit"],
+    example: "get_plex_item_details title=The Sopranos itemType=show"
+  },
+  {
+    name: "browse_plex_by_genre",
+    summary: "Browse movies, shows, or albums by genre.",
+    options: ["genre", "mediaType", "section", "limit"],
+    example: "browse_plex_by_genre genre=Fantasy mediaType=tv"
+  },
+  {
+    name: "browse_plex_by_decade",
+    summary: "Browse movies, shows, or albums from a specific decade.",
+    options: ["decade", "mediaType", "section", "limit"],
+    example: "browse_plex_by_decade decade=1990 mediaType=movie"
+  },
+  {
+    name: "get_plex_library_stats",
+    summary: "Summarize Plex library counts, top genres, duplicates, and recent additions.",
+    options: ["mediaType", "section", "topGenreLimit"],
+    example: "get_plex_library_stats section=TV Shows mediaType=tv"
+  },
+  {
+    name: "get_plex_show_summary",
+    summary: "Summarize a show with seasons, episodes, genres, and recent additions.",
+    options: ["showTitle"],
+    example: "get_plex_show_summary showTitle=The Sopranos"
+  },
+  {
+    name: "get_plex_season_summary",
+    summary: "Summarize one TV season with counts, runtime, and air-date range.",
+    options: ["showTitle", "seasonIndex"],
+    example: "get_plex_season_summary showTitle=The Sopranos seasonIndex=6"
+  },
+  {
+    name: "browse_plex_show_episodes",
+    summary: "Browse episodes for a show with proper season and episode ordering.",
+    options: ["showTitle", "seasonIndex", "limit"],
+    example: "browse_plex_show_episodes showTitle=The Sopranos seasonIndex=1"
+  },
+  {
+    name: "find_plex_episode",
+    summary: "Search episodes by episode title, optionally scoped to one show.",
+    options: ["query", "showTitle", "limit"],
+    example: "find_plex_episode query=Northern showTitle=Daredevil"
+  },
+  {
+    name: "get_recently_aired_episodes",
+    summary: "Find episodes that aired recently, optionally narrowed to one show.",
+    options: ["days", "showTitle", "limit"],
+    example: "get_recently_aired_episodes days=14"
+  },
+  {
+    name: "find_plex_series_gaps",
+    summary: "Detect possible missing seasons or episode gaps in TV shows.",
+    options: ["showTitle", "section", "limit"],
+    example: "find_plex_series_gaps section=TV Shows"
+  },
+  {
+    name: "browse_plex_children",
+    summary: "Browse a show's episodes, an artist's albums, or an album's tracks.",
+    options: ["parentTitle", "parentType", "section", "limit"],
+    example: "browse_plex_children parentTitle=Ursula K. Le Guin parentType=artist"
+  },
+  {
+    name: "list_plex_duplicates",
+    summary: "Find duplicate titles grouped by title, type, and section.",
+    options: ["section", "itemType", "limit"],
+    example: "list_plex_duplicates section=Audio Books itemType=album"
+  },
+  {
+    name: "get_recent_plex_additions",
+    summary: "List the most recent Plex additions.",
+    options: ["section", "itemType", "limit"],
+    example: "get_recent_plex_additions section=Movies limit=10"
+  }
+];
+
 function formatListEntry(slug: string, title: string, tags: string[]) {
   const suffix = tags.length > 0 ? ` | tags: ${tags.join(", ")}` : "";
   return `- ${slug} | ${title}${suffix}`;
+}
+
+function formatCommandCatalog(title: string, entries: CommandCatalogEntry[], query?: string) {
+  const normalized = query?.trim().toLowerCase();
+  const filtered = normalized
+    ? entries.filter((entry) => {
+        const haystack = [entry.name, entry.summary, ...(entry.options ?? []), entry.example ?? ""]
+          .join(" ")
+          .toLowerCase();
+        return haystack.includes(normalized);
+      })
+    : entries;
+
+  const lines = [
+    `${title} commands: ${filtered.length}${normalized ? ` matched "${query}"` : ` available`}.`,
+    normalized ? `Tip: remove the filter to see the full ${title.toLowerCase()} command list.` : `Tip: pass a short query to narrow results, for example "cleanup", "volume", "show", or "watch".`,
+    ""
+  ];
+
+  if (filtered.length === 0) {
+    lines.push(`- No ${title.toLowerCase()} commands matched that filter.`);
+    return lines.join("\n");
+  }
+
+  for (const entry of filtered) {
+    lines.push(`- ${entry.name}`);
+    lines.push(`  ${entry.summary}`);
+
+    if (entry.options && entry.options.length > 0) {
+      lines.push(`  Options: ${entry.options.join(", ")}`);
+    }
+
+    if (entry.example) {
+      lines.push(`  Example: ${entry.example}`);
+    }
+  }
+
+  return lines.join("\n");
 }
 
 async function withAudit<T>(
@@ -108,7 +370,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.10"
+    version: "0.2.11"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -126,6 +388,40 @@ export function createServer() {
     async () => {
       return withAudit("get_time", undefined, async () => ({
         content: [{ type: "text", text: new Date().toISOString() }]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_docker_commands",
+    "Use this to list Docker-related MCP commands exposed by this server, with an optional keyword filter.",
+    {
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional keyword filter, for example cleanup, volume, project, resource, or health")
+    },
+    async ({ query }) => {
+      return withAudit("list_docker_commands", { query }, async () => ({
+        content: [{ type: "text", text: formatCommandCatalog("Docker", DOCKER_COMMAND_CATALOG, query) }]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_plex_commands",
+    "Use this to list Plex-related MCP commands exposed by this server, with an optional keyword filter.",
+    {
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional keyword filter, for example episode, show, duplicate, recent, watch, or search")
+    },
+    async ({ query }) => {
+      return withAudit("list_plex_commands", { query }, async () => ({
+        content: [{ type: "text", text: formatCommandCatalog("Plex", PLEX_COMMAND_CATALOG, query) }]
       }));
     }
   );

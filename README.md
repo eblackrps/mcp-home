@@ -9,6 +9,8 @@ The initial toolset is intentionally conservative:
 
 - `ping`
 - `get_time`
+- `list_docker_commands`
+- `list_plex_commands`
 - `get_homelab_status`
 - `get_host_status`
 - `get_docker_status`
@@ -142,6 +144,7 @@ The current implementation expects Python 3 on the Windows host for the Plex dat
 
 Once you have refreshed the host data, these tools become useful:
 
+- `list_docker_commands`
 - `get_host_status`
 - `get_docker_status`
 - `list_docker_containers`
@@ -156,6 +159,7 @@ Once you have refreshed the host data, these tools become useful:
 - `get_docker_project_details`
 - `list_docker_volumes`
 - `get_docker_cleanup_candidates`
+- `list_plex_commands`
 - `get_plex_status`
 - `get_plex_server_activity`
 - `get_plex_now_playing`
