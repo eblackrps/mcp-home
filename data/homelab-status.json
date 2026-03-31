@@ -1,0 +1,37 @@
+{
+  "generatedAt": "2026-03-31T10:30:00-04:00",
+  "summary": "Core services healthy. Backups completed overnight. One non-critical media job is still running.",
+  "services": [
+    {
+      "name": "router",
+      "status": "healthy",
+      "details": "WAN stable for 12d 4h, no packet loss alarms.",
+      "lastChecked": "2026-03-31T10:25:00-04:00"
+    },
+    {
+      "name": "nas",
+      "status": "healthy",
+      "details": "Main array online with 18.4 TB free.",
+      "lastChecked": "2026-03-31T10:24:00-04:00"
+    },
+    {
+      "name": "ups",
+      "status": "healthy",
+      "details": "Battery at 100%, estimated runtime 41 minutes.",
+      "lastChecked": "2026-03-31T10:23:00-04:00"
+    },
+    {
+      "name": "backups",
+      "status": "healthy",
+      "details": "Nightly backup finished successfully at 02:14 ET.",
+      "lastChecked": "2026-03-31T02:15:00-04:00"
+    },
+    {
+      "name": "media-jobs",
+      "status": "degraded",
+      "details": "One library scan is still running but serving remains available.",
+      "lastChecked": "2026-03-31T10:22:00-04:00"
+    }
+  ]
+}
+

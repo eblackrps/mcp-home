@@ -7,6 +7,7 @@
     "build": "tsc -p tsconfig.json",
     "dev:http": "tsx src/index-http.ts",
     "dev:stdio": "tsx src/index-stdio.ts",
+    "smoke:http": "tsx scripts/smoke-http.ts",
     "start:http": "node dist/index-http.js",
     "start:stdio": "node dist/index-stdio.js"
   },
@@ -24,4 +25,3 @@
     "typescript": "^5.9.3"
   }
 }
-

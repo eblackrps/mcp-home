@@ -2,6 +2,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
+import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { log } from "./logger.js";
 
@@ -36,6 +37,30 @@ export function createServer() {
       return {
         content: [{ type: "text", text: new Date().toISOString() }]
       };
+    }
+  );
+
+  server.tool(
+    "get_homelab_status",
+    "Use this to read the current homelab status summary from a local JSON snapshot. Optionally filter by service name.",
+    {
+      service: z.string().min(1).optional().describe("Optional service name filter, for example nas or backups")
+    },
+    async ({ service }) => {
+      log("tool get_homelab_status");
+
+      try {
+        const status = await readHomelabStatus();
+        return {
+          content: [{ type: "text", text: formatHomelabStatus(status, service) }]
+        };
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unknown error";
+        return {
+          content: [{ type: "text", text: `Unable to read homelab status: ${message}` }],
+          isError: true
+        };
+      }
     }
   );
 

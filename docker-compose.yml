@@ -5,7 +5,11 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      NOTES_DIR: /app/notes
+      HOMELAB_STATUS_PATH: /app/data/homelab-status.json
     volumes:
+      - ./data:/app/data:ro
       - ./notes:/app/notes:ro
     expose:
       - "8787"
@@ -29,4 +33,3 @@ services:
 volumes:
   caddy_data:
   caddy_config:
-

@@ -9,6 +9,7 @@ The initial toolset is intentionally conservative:
 
 - `ping`
 - `get_time`
+- `get_homelab_status`
 - `list_notes`
 - `search_notes`
 - `read_note`
@@ -66,6 +67,12 @@ mcp-home/
 
    ```powershell
    Invoke-RestMethod http://localhost:8787/health
+   ```
+
+6. Run the built-in HTTP smoke test while the HTTP server is running:
+
+   ```powershell
+   npm run smoke:http
    ```
 
 ## Claude setup
@@ -175,7 +182,7 @@ Bring it up with:
 docker compose up --build -d
 ```
 
-Set `MCP_DOMAIN` in `.env`, point DNS at your home endpoint or tunnel, and Caddy will terminate TLS for that hostname.
+For local development, `.env` uses repo-relative paths like `./notes` and `./data/homelab-status.json`. Docker Compose overrides those with container paths automatically. Set `MCP_DOMAIN` in `.env`, point DNS at your home endpoint or tunnel, and Caddy will terminate TLS for that hostname.
 
 ## Security notes
 
@@ -190,7 +197,6 @@ Keep this server read-only until you trust the deployment path and logging.
 
 Good next additions:
 
-- `get_homelab_status`
 - structured audit logging
 - per-tool auth policy
 - a separate admin-only MCP server for higher-risk tools

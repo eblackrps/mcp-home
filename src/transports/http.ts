@@ -39,6 +39,8 @@ export async function startHttp() {
   });
 
   app.listen(port, "0.0.0.0", () => {
-    log(`http MCP server listening on :${port} with tools ping, get_time, list_notes, search_notes, read_note`);
+    log(
+      `http MCP server listening on :${port} with tools ping, get_time, get_homelab_status, list_notes, search_notes, read_note`
+    );
   });
 }
