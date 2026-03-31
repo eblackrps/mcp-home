@@ -375,6 +375,15 @@ Keep this server read-only until you trust the deployment path and logging.
 - Prefer Tailscale or Cloudflare Tunnel over raw router port forwarding.
 - Keep host-generated snapshots in `data/local/` out of version control. They can reveal local library names and machine details.
 
+## Public sharing checklist
+
+Before flipping the repository from private to public:
+
+- confirm `.env`, `data/local/`, `logs/`, and OAuth state files are still ignored
+- rotate any real tokens or passwords that were ever used locally, even if they were later removed
+- sanity-check `README.md`, sample notes, and `data/homelab-status.json` for anything you would not want indexed publicly
+- decide whether you want to add an explicit license before publishing
+
 ## Next steps
 
 Good next additions:

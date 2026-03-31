@@ -1,10 +1,14 @@
 node_modules/
 dist/
 .env
+.env.*
 .DS_Store
 caddy_data/
 caddy_config/
 npm-debug.log*
-logs/
-data/local/*.json
-state/*.json
+logs/*
+!logs/.gitignore
+data/local/*
+!data/local/.gitignore
+state/*
+!state/.gitignore
