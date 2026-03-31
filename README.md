@@ -115,6 +115,16 @@ When OAuth mode is working, the smoke test should show:
 
 After that, re-enable `tailscale funnel` and connect the app from ChatGPT in Developer mode using your public MCP URL. ChatGPT will open a browser login step where you enter the shared password.
 
+Your reverse proxy must expose these OAuth routes publicly, not just `/mcp`:
+
+- `/.well-known/oauth-protected-resource/mcp`
+- `/.well-known/oauth-authorization-server`
+- `/authorize`
+- `/register`
+- `/token`
+- `/revoke`
+- `/oauth/login`
+
 ## Recommended remote path: Caddy + Tailscale Funnel
 
 This is the cleanest home setup if you do not want to open router ports.

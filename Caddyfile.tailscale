@@ -10,8 +10,31 @@
         reverse_proxy mcp-home:8787
     }
 
+    handle /.well-known/* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /authorize* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /register* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /token* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /revoke* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /oauth/* {
+        reverse_proxy mcp-home:8787
+    }
+
     handle {
         respond "not found" 404
     }
 }
-
