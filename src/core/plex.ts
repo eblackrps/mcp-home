@@ -41,6 +41,12 @@ type PlexRecentOptions = {
   limit?: number;
 };
 
+type PlexTitleSearchOptions = {
+  query: string;
+  mediaType: "movie" | "tv" | "audio";
+  limit?: number;
+};
+
 const DEFAULT_PLEX_LIBRARY_INDEX_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/plex-library-index.json", import.meta.url))
 );
@@ -156,6 +162,18 @@ function formatContext(item: PlexLibraryItem) {
   return context.length > 0 ? context.join(" > ") : "";
 }
 
+function matchesTitleMediaType(item: PlexLibraryItem, mediaType: PlexTitleSearchOptions["mediaType"]) {
+  if (mediaType === "movie") {
+    return item.itemType === "movie";
+  }
+
+  if (mediaType === "tv") {
+    return item.itemType === "show";
+  }
+
+  return item.itemType === "artist" || item.itemType === "album" || item.itemType === "track";
+}
+
 function byNewestAddedAt(left: PlexLibraryItem, right: PlexLibraryItem) {
   const leftTime = left.addedAt ? Date.parse(left.addedAt) : 0;
   const rightTime = right.addedAt ? Date.parse(right.addedAt) : 0;
@@ -251,6 +269,55 @@ export function formatPlexSearchResults(
 
     if (item.summarySnippet) {
       lines.push(`  ${item.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function searchPlexTitles(index: PlexLibraryIndex, options: PlexTitleSearchOptions) {
+  const query = normalize(options.query);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  if (!query) {
+    return [];
+  }
+
+  return index.items
+    .filter((item) => matchesTitleMediaType(item, options.mediaType) && item.title.toLowerCase().includes(query))
+    .map((item) => ({
+      item,
+      score: scoreItem(item, query)
+    }))
+    .sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+
+      return left.item.title.localeCompare(right.item.title);
+    })
+    .slice(0, limit)
+    .map((entry) => entry.item);
+}
+
+export function formatPlexTitleSearchResults(
+  results: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexTitleSearchOptions
+) {
+  if (results.length === 0) {
+    return `No ${options.mediaType} titles matched "${options.query}".`;
+  }
+
+  const lines = [`Generated: ${index.generatedAt}`, `Title matches for "${options.query}" (${options.mediaType}):`, ""];
+
+  for (const item of results) {
+    const year = item.year ? ` | ${item.year}` : "";
+    lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}`);
+
+    const context = formatContext(item);
+    if (context) {
+      lines.push(`  Context: ${context}`);
     }
   }
 

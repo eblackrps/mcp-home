@@ -74,6 +74,73 @@ function Format-ProcessSummary {
   return ($Processes | Sort-Object) -join ", "
 }
 
+function Get-DockerLabelValue {
+  param(
+    [string]$Labels,
+    [string]$Key
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Labels)) {
+    return $null
+  }
+
+  foreach ($label in ($Labels -split ",")) {
+    $trimmed = $label.Trim()
+    if ($trimmed.StartsWith("${Key}=")) {
+      return $trimmed.Substring($Key.Length + 1)
+    }
+  }
+
+  return $null
+}
+
+function Get-DockerContainers {
+  param([System.Management.Automation.CommandInfo]$DockerCommand)
+
+  $containers = @()
+  if ($null -eq $DockerCommand) {
+    return $containers
+  }
+
+  $rawContainers = & $DockerCommand.Source ps -a --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawContainers) {
+    return $containers
+  }
+
+  foreach ($line in @($rawContainers)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $networks = @()
+    if ($record.Networks) {
+      $networks = @(
+        ($record.Networks -split ",") |
+          ForEach-Object { $_.Trim() } |
+          Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+      )
+    }
+
+    $labels = [string]$record.Labels
+    $containers += [ordered]@{
+      id = [string]$record.ID
+      name = [string]$record.Names
+      image = [string]$record.Image
+      state = [string]$record.State
+      status = [string]$record.Status
+      ports = if ($record.Ports) { [string]$record.Ports } else { $null }
+      runningFor = if ($record.RunningFor) { [string]$record.RunningFor } else { $null }
+      createdAt = if ($record.CreatedAt) { [string]$record.CreatedAt } else { $null }
+      networks = $networks
+      composeProject = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.project"
+      composeService = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.service"
+    }
+  }
+
+  return $containers
+}
+
 $os = Get-CimInstance Win32_OperatingSystem
 $bootTime = $os.LastBootUpTime
 $uptimeSpan = (Get-Date) - $bootTime
@@ -81,9 +148,28 @@ $uptimeText = "{0}d {1}h {2}m" -f [Math]::Floor($uptimeSpan.TotalDays), $uptimeS
 
 $dockerProcesses = Get-ProcessNames -Names @("Docker Desktop", "com.docker.backend", "docker-agent", "docker-sandbox")
 $dockerServices = Convert-ServiceState -Names @("com.docker.service")
+$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+$dockerCliVersion = $null
+$dockerContainers = @()
+
+if ($dockerCommand) {
+  $dockerVersionOutput = & $dockerCommand.Source version --format '{{.Client.Version}}' 2>$null
+  if ($LASTEXITCODE -eq 0 -and $dockerVersionOutput) {
+    $dockerCliVersion = ($dockerVersionOutput | Select-Object -First 1).Trim()
+  }
+
+  $dockerContainers = @(Get-DockerContainers -DockerCommand $dockerCommand)
+}
+
+$dockerRunningCount = @($dockerContainers | Where-Object { $_.state -eq "running" }).Count
+$dockerExitedCount = @($dockerContainers | Where-Object { $_.state -eq "exited" }).Count
+$dockerUnhealthyCount = @($dockerContainers | Where-Object { $_.status -match "unhealthy" }).Count
+$dockerProblemCount = @(
+  $dockerContainers | Where-Object { $_.status -match "unhealthy" -or $_.state -in @("restarting", "dead") }
+).Count
 $dockerRunning = $dockerProcesses.Count -gt 0
-$dockerStatus = if ($dockerRunning) { "healthy" } elseif ($dockerServices.Count -gt 0) { "degraded" } else { "offline" }
-$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices)."
+$dockerStatus = if ($dockerRunning -and $dockerProblemCount -eq 0) { "healthy" } elseif ($dockerRunning -or $dockerServices.Count -gt 0) { "degraded" } else { "offline" }
+$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy."
 $dockerComponent = New-Component -Name "docker" -Status $dockerStatus -Details $dockerDetails
 
 $corsairProcesses = Get-ProcessNames -Names @(
@@ -193,6 +279,15 @@ $payload = [ordered]@{
     uptime = $uptimeText
   }
   components = $components
+  docker = [ordered]@{
+    available = ($null -ne $dockerCommand)
+    cliVersion = $dockerCliVersion
+    containerCount = @($dockerContainers).Count
+    runningCount = $dockerRunningCount
+    exitedCount = $dockerExitedCount
+    unhealthyCount = $dockerUnhealthyCount
+    containers = $dockerContainers
+  }
   plex = [ordered]@{
     reachable = $plexReachable
     localUrl = $plexLocalUrl

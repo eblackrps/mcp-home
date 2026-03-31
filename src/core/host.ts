@@ -16,6 +16,30 @@ export type PlexLibrarySummary = {
   lastScannedAt?: string | null;
 };
 
+export type DockerContainerStatus = {
+  id: string;
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  ports?: string | null;
+  runningFor?: string | null;
+  createdAt?: string | null;
+  networks?: string[];
+  composeProject?: string | null;
+  composeService?: string | null;
+};
+
+export type DockerStatus = {
+  available: boolean;
+  cliVersion?: string | null;
+  containerCount: number;
+  runningCount: number;
+  exitedCount: number;
+  unhealthyCount: number;
+  containers: DockerContainerStatus[];
+};
+
 export type PlexStatus = {
   reachable: boolean;
   localUrl: string;
@@ -36,6 +60,7 @@ export type WindowsHostStatus = {
     uptime: string;
   };
   components: HostComponent[];
+  docker?: DockerStatus;
   plex?: PlexStatus;
 };
 
@@ -103,6 +128,49 @@ function assertPlexStatus(value: unknown): asserts value is PlexStatus {
   }
 }
 
+function assertDockerContainerStatus(value: unknown): asserts value is DockerContainerStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Docker container entries must be objects");
+  }
+
+  const candidate = value as Partial<DockerContainerStatus>;
+  if (
+    typeof candidate.id !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.image !== "string" ||
+    typeof candidate.state !== "string" ||
+    typeof candidate.status !== "string"
+  ) {
+    throw new Error("Docker container entries are missing required fields");
+  }
+
+  if (candidate.networks !== undefined && !Array.isArray(candidate.networks)) {
+    throw new Error("Docker container networks must be an array when present");
+  }
+}
+
+function assertDockerStatus(value: unknown): asserts value is DockerStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Docker status must be an object");
+  }
+
+  const candidate = value as Partial<DockerStatus>;
+  if (
+    typeof candidate.available !== "boolean" ||
+    typeof candidate.containerCount !== "number" ||
+    typeof candidate.runningCount !== "number" ||
+    typeof candidate.exitedCount !== "number" ||
+    typeof candidate.unhealthyCount !== "number" ||
+    !Array.isArray(candidate.containers)
+  ) {
+    throw new Error("Docker status is missing required fields");
+  }
+
+  for (const container of candidate.containers) {
+    assertDockerContainerStatus(container);
+  }
+}
+
 function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostStatus {
   if (!value || typeof value !== "object") {
     throw new Error("Windows host status payload must be an object");
@@ -136,9 +204,21 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
     assertComponent(component);
   }
 
+  if (candidate.docker !== undefined) {
+    assertDockerStatus(candidate.docker);
+  }
+
   if (candidate.plex !== undefined) {
     assertPlexStatus(candidate.plex);
   }
+}
+
+function normalize(value: string | undefined) {
+  return value?.trim().toLowerCase();
+}
+
+function formatDockerContainerLine(container: DockerContainerStatus) {
+  return `- ${container.name} | ${container.state} | ${container.image}`;
 }
 
 export function getWindowsHostStatusPath() {
@@ -169,7 +249,7 @@ export async function readWindowsHostStatus(
 }
 
 export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilter?: string) {
-  const normalized = componentFilter?.trim().toLowerCase();
+  const normalized = normalize(componentFilter);
   const components = normalized
     ? status.components.filter((component) => component.name.toLowerCase().includes(normalized))
     : status.components;
@@ -193,6 +273,117 @@ export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilt
   for (const component of components) {
     lines.push(`- ${component.name} | ${component.status} | last checked ${component.lastChecked}`);
     lines.push(`  ${component.details}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerStatus(status: WindowsHostStatus) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const dockerComponent = status.components.find((component) => component.name === "docker");
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker CLI available: ${docker.available ? "yes" : "no"}`,
+    `Client version: ${docker.cliVersion || "unknown"}`,
+    `Containers: ${docker.containerCount} total | ${docker.runningCount} running | ${docker.exitedCount} exited | ${docker.unhealthyCount} unhealthy`,
+    ""
+  ];
+
+  if (dockerComponent) {
+    lines.push(`Runtime: ${dockerComponent.status}`);
+    lines.push(dockerComponent.details);
+    lines.push("");
+  }
+
+  lines.push("Active containers:");
+  const activeContainers = docker.containers.filter((container) => container.state === "running");
+  if (activeContainers.length === 0) {
+    lines.push("- No running containers in the latest snapshot.");
+  } else {
+    for (const container of activeContainers) {
+      lines.push(formatDockerContainerLine(container));
+      lines.push(`  ${container.status}`);
+
+      if (container.ports) {
+        lines.push(`  Ports: ${container.ports}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerContainers(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    state?: string;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const state = normalize(options?.state);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+
+  const filtered = docker.containers
+    .filter((container) => {
+      if (name && !container.name.toLowerCase().includes(name) && !container.image.toLowerCase().includes(name)) {
+        return false;
+      }
+
+      if (state && container.state.toLowerCase() !== state) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((left, right) => left.name.localeCompare(right.name))
+    .slice(0, limit);
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.state ? `state=${options.state}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Docker containers (${filters}):` : "Docker containers:",
+    ""
+  ];
+
+  if (filtered.length === 0) {
+    lines.push("- No containers matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const container of filtered) {
+    lines.push(formatDockerContainerLine(container));
+    lines.push(`  ${container.status}`);
+
+    if (container.ports) {
+      lines.push(`  Ports: ${container.ports}`);
+    }
+
+    if (container.composeProject || container.composeService) {
+      lines.push(
+        `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+      );
+    }
+
+    if (container.networks && container.networks.length > 0) {
+      lines.push(`  Networks: ${container.networks.join(", ")}`);
+    }
   }
 
   return lines.join("\n");

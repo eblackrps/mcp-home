@@ -3,15 +3,23 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
-import { formatPlexStatus, formatWindowsHostStatus, readWindowsHostStatus } from "./host.js";
+import {
+  formatDockerContainers,
+  formatDockerStatus,
+  formatPlexStatus,
+  formatWindowsHostStatus,
+  readWindowsHostStatus
+} from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
   formatPlexSearchResults,
+  formatPlexTitleSearchResults,
   formatPlexSections,
   formatRecentPlexAdditions,
   getRecentPlexAdditions,
   readPlexLibraryIndex,
-  searchPlexLibrary
+  searchPlexLibrary,
+  searchPlexTitles
 } from "./plex.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 
@@ -55,7 +63,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.0"
+    version: "0.2.2"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -127,6 +135,69 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to read Windows host status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_status",
+    "Use this to read the current Docker Desktop and container summary from the local Windows host snapshot.",
+    {},
+    async () => {
+      return withAudit("get_docker_status", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerStatus(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Docker status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_docker_containers",
+    "Use this to list Docker containers from the local Windows host snapshot, with optional name or state filters.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image substring filter"),
+      state: z
+        .enum(["running", "exited", "paused", "restarting", "created", "dead"])
+        .optional()
+        .describe("Optional Docker state filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, state, limit }) => {
+      return withAudit("list_docker_containers", { name, state, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerContainers(status, { name, state, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_docker_containers returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Docker containers: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -221,6 +292,42 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to search Plex: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "search_plex_titles",
+    "Use this to search Plex titles by media type when you specifically want movies, TV shows, or audio titles.",
+    {
+      query: z.string().min(1).describe("Title or phrase to search for in Plex titles"),
+      mediaType: z
+        .enum(["movie", "tv", "audio"])
+        .describe("Choose movie for films, tv for series titles, or audio for artist, album, or track titles"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of results to return, from 1 to 25")
+    },
+    async ({ query, mediaType, limit }) => {
+      return withAudit("search_plex_titles", { query, mediaType, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = searchPlexTitles(index, { query, mediaType, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexTitleSearchResults(results, index, { query, mediaType, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool search_plex_titles returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search Plex titles: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

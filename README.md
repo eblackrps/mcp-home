@@ -11,9 +11,12 @@ The initial toolset is intentionally conservative:
 - `get_time`
 - `get_homelab_status`
 - `get_host_status`
+- `get_docker_status`
+- `list_docker_containers`
 - `get_plex_status`
 - `list_plex_sections`
 - `search_plex_library`
+- `search_plex_titles`
 - `get_recent_plex_additions`
 - `list_notes`
 - `search_notes`
@@ -97,6 +100,7 @@ npm run refresh:host
 That script:
 
 - reads Windows uptime plus Docker Desktop, Corsair iCUE, and Plex process or service state
+- captures a read-only Docker container snapshot from `docker ps -a`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
 - writes:
@@ -108,9 +112,12 @@ The current implementation expects Python 3 on the Windows host for the Plex dat
 Once you have refreshed the host data, these tools become useful:
 
 - `get_host_status`
+- `get_docker_status`
+- `list_docker_containers`
 - `get_plex_status`
 - `list_plex_sections`
 - `search_plex_library`
+- `search_plex_titles`
 - `get_recent_plex_additions`
 
 ## Automating the Windows refresh
