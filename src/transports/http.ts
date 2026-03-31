@@ -112,7 +112,7 @@ export async function startHttp() {
 
   app.listen(port, "0.0.0.0", () => {
     log(
-      `http MCP server listening on :${port} with auth mode ${authMode} and tools ping, get_time, get_homelab_status, list_notes, search_notes, read_note`
+      `http MCP server listening on :${port} with auth mode ${authMode} and tools ping, get_time, get_homelab_status, get_host_status, get_plex_status, search_plex_library, list_notes, search_notes, read_note`
     );
   });
 }

@@ -1,12 +1,13 @@
 {
   "name": "mcp-home",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev:http": "tsx src/index-http.ts",
     "dev:stdio": "tsx src/index-stdio.ts",
+    "refresh:host": "powershell -ExecutionPolicy Bypass -File scripts/refresh-windows-host.ps1",
     "test:anthropic:mcp": "tsx scripts/test-anthropic-mcp.ts",
     "test:openai:mcp": "tsx scripts/test-openai-mcp.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",

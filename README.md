@@ -10,6 +10,9 @@ The initial toolset is intentionally conservative:
 - `ping`
 - `get_time`
 - `get_homelab_status`
+- `get_host_status`
+- `get_plex_status`
+- `search_plex_library`
 - `list_notes`
 - `search_notes`
 - `read_note`
@@ -26,7 +29,10 @@ The server keeps tool logic in one shared registry and adds two thin transports 
 
 ```text
 mcp-home/
+  data/
+    local/
   notes/
+  scripts/
   src/
     core/
     transports/
@@ -75,6 +81,33 @@ mcp-home/
    npm run smoke:http
    ```
 
+## Windows host refresh
+
+The Docker container cannot see Windows services, iCUE, or Plex directly, so the repo now uses a host-side refresh step that writes read-only JSON snapshots into `data/local/`.
+
+Run this on the Windows host whenever you want fresh system and Plex data:
+
+```powershell
+npm run refresh:host
+```
+
+That script:
+
+- reads Windows uptime plus Docker Desktop, Corsair iCUE, and Plex process or service state
+- probes the local Plex server at `http://127.0.0.1:32400/identity`
+- exports a searchable Plex library index from the local Plex SQLite database
+- writes:
+  - `data/local/windows-host-status.json`
+  - `data/local/plex-library-index.json`
+
+The current implementation expects Python 3 on the Windows host for the Plex database export. The MCP server stays read-only and only reads the generated JSON files.
+
+Once you have refreshed the host data, these tools become useful:
+
+- `get_host_status`
+- `get_plex_status`
+- `search_plex_library`
+
 ## Model API checks
 
 OpenAI and Anthropic cannot reach `http://localhost:8787/mcp` directly. Before using either API, expose your MCP server on a public HTTPS URL with Caddy plus a tunnel or your own domain, then set `MCP_SERVER_URL` in `.env`.
@@ -90,7 +123,7 @@ npm run test:anthropic:mcp
 
 If you want to connect this server to ChatGPT without leaving the endpoint unauthenticated, use the built-in OAuth mode.
 
-Set these values in [`.env`](C:/MCP@home/.env):
+Set these values in `.env`:
 
 ```text
 MCP_AUTH_MODE=oauth
@@ -289,9 +322,9 @@ docker compose up --build -d
 
 For local development, `.env` uses repo-relative paths like `./notes` and `./data/homelab-status.json`. Docker Compose overrides those with container paths automatically.
 
-Use [docker-compose.yml](C:/MCP@home/docker-compose.yml) when you want Caddy to terminate TLS directly for your own domain.
+Use `docker-compose.yml` when you want Caddy to terminate TLS directly for your own domain.
 
-Use [docker-compose.tailscale.yml](C:/MCP@home/docker-compose.tailscale.yml) plus [Caddyfile.tailscale](C:/MCP@home/Caddyfile.tailscale) when you want Tailscale Funnel to provide the public HTTPS URL.
+Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tailscale Funnel to provide the public HTTPS URL.
 
 ## Security notes
 
@@ -301,6 +334,7 @@ Keep this server read-only until you trust the deployment path and logging.
 - Keep `allowed_tools` narrow on every remote API call.
 - Do not expose shell, SSH, Docker control, or file writes on the same server as broad read-only tools.
 - Prefer Tailscale or Cloudflare Tunnel over raw router port forwarding.
+- Keep host-generated snapshots in `data/local/` out of version control. They can reveal local library names and machine details.
 
 ## Next steps
 
