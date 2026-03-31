@@ -35,6 +35,12 @@ type PlexSearchOptions = {
   limit?: number;
 };
 
+type PlexRecentOptions = {
+  section?: string;
+  itemType?: string;
+  limit?: number;
+};
+
 const DEFAULT_PLEX_LIBRARY_INDEX_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/plex-library-index.json", import.meta.url))
 );
@@ -150,6 +156,17 @@ function formatContext(item: PlexLibraryItem) {
   return context.length > 0 ? context.join(" > ") : "";
 }
 
+function byNewestAddedAt(left: PlexLibraryItem, right: PlexLibraryItem) {
+  const leftTime = left.addedAt ? Date.parse(left.addedAt) : 0;
+  const rightTime = right.addedAt ? Date.parse(right.addedAt) : 0;
+
+  if (rightTime !== leftTime) {
+    return rightTime - leftTime;
+  }
+
+  return left.title.localeCompare(right.title);
+}
+
 export function getPlexLibraryIndexPath() {
   return process.env.PLEX_LIBRARY_INDEX_PATH ?? DEFAULT_PLEX_LIBRARY_INDEX_PATH;
 }
@@ -226,6 +243,85 @@ export function formatPlexSearchResults(
   for (const item of results) {
     const year = item.year ? ` | ${item.year}` : "";
     lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}`);
+
+    const context = formatContext(item);
+    if (context) {
+      lines.push(`  Context: ${context}`);
+    }
+
+    if (item.summarySnippet) {
+      lines.push(`  ${item.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function listPlexSections(index: PlexLibraryIndex) {
+  return [...index.sections].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+export function formatPlexSections(index: PlexLibraryIndex) {
+  const sections = listPlexSections(index);
+  const lines = [`Generated: ${index.generatedAt}`, "Libraries:", ""];
+
+  for (const section of sections) {
+    const suffix = section.lastScannedAt ? ` | last scanned ${section.lastScannedAt}` : "";
+    lines.push(`- ${section.name} | ${section.sectionType} | ${section.itemCount} items${suffix}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function getRecentPlexAdditions(index: PlexLibraryIndex, options: PlexRecentOptions) {
+  const section = normalize(options.section);
+  const itemType = normalize(options.itemType);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  return index.items
+    .filter((item) => {
+      if (!item.addedAt) {
+        return false;
+      }
+
+      if (section && !item.section.toLowerCase().includes(section)) {
+        return false;
+      }
+
+      if (itemType && item.itemType.toLowerCase() !== itemType) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(byNewestAddedAt)
+    .slice(0, limit);
+}
+
+export function formatRecentPlexAdditions(
+  items: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexRecentOptions
+) {
+  const filters = [options.section ? `section=${options.section}` : "", options.itemType ? `type=${options.itemType}` : ""]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    filters ? `Recent Plex additions (${filters}):` : "Recent Plex additions:",
+    ""
+  ];
+
+  if (items.length === 0) {
+    lines.push("- No recent additions matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const item of items) {
+    const year = item.year ? ` | ${item.year}` : "";
+    const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
+    lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
 
     const context = formatContext(item);
     if (context) {

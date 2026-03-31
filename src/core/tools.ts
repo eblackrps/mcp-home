@@ -5,7 +5,14 @@ import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import { formatPlexStatus, formatWindowsHostStatus, readWindowsHostStatus } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
-import { formatPlexSearchResults, readPlexLibraryIndex, searchPlexLibrary } from "./plex.js";
+import {
+  formatPlexSearchResults,
+  formatPlexSections,
+  formatRecentPlexAdditions,
+  getRecentPlexAdditions,
+  readPlexLibraryIndex,
+  searchPlexLibrary
+} from "./plex.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -48,7 +55,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.1.0"
+    version: "0.2.0"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -158,6 +165,34 @@ export function createServer() {
   );
 
   server.tool(
+    "list_plex_sections",
+    "Use this to list the available Plex library sections from the local exported index.",
+    {},
+    async () => {
+      return withAudit("list_plex_sections", undefined, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          return {
+            content: [{ type: "text", text: formatPlexSections(index) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_plex_sections returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Plex sections: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "search_plex_library",
     "Use this to search the local Plex library index by title, with optional section and item type filters.",
     {
@@ -186,6 +221,43 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to search Plex: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_recent_plex_additions",
+    "Use this to list the most recent Plex additions, with optional section and item type filters.",
+    {
+      section: z.string().min(1).optional().describe("Optional library section name, for example Movies, TV Shows, Music, or Audio Books"),
+      itemType: z
+        .enum(["movie", "show", "season", "episode", "artist", "album", "track"])
+        .optional()
+        .describe("Optional Plex item type filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of results to return, from 1 to 25")
+    },
+    async ({ section, itemType, limit }) => {
+      return withAudit("get_recent_plex_additions", { section, itemType, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = getRecentPlexAdditions(index, { section, itemType, limit });
+
+          return {
+            content: [{ type: "text", text: formatRecentPlexAdditions(results, index, { section, itemType, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_recent_plex_additions returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read recent Plex additions: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

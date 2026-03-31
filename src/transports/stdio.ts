@@ -7,7 +7,7 @@ export async function startStdio() {
   const transport = new StdioServerTransport();
 
   log(
-    "starting stdio transport with tools ping, get_time, get_homelab_status, get_host_status, get_plex_status, search_plex_library, list_notes, search_notes, read_note"
+    "starting stdio transport with tools ping, get_time, get_homelab_status, get_host_status, get_plex_status, list_plex_sections, search_plex_library, get_recent_plex_additions, list_notes, search_notes, read_note"
   );
   await server.connect(transport);
 }

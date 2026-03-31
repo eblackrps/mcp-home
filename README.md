@@ -12,7 +12,9 @@ The initial toolset is intentionally conservative:
 - `get_homelab_status`
 - `get_host_status`
 - `get_plex_status`
+- `list_plex_sections`
 - `search_plex_library`
+- `get_recent_plex_additions`
 - `list_notes`
 - `search_notes`
 - `read_note`
@@ -106,7 +108,9 @@ Once you have refreshed the host data, these tools become useful:
 
 - `get_host_status`
 - `get_plex_status`
+- `list_plex_sections`
 - `search_plex_library`
+- `get_recent_plex_additions`
 
 ## Automating the Windows refresh
 
