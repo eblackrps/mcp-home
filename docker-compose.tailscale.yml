@@ -1,0 +1,27 @@
+services:
+  mcp-home:
+    build: .
+    container_name: mcp-home
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      NOTES_DIR: /app/notes
+      HOMELAB_STATUS_PATH: /app/data/homelab-status.json
+    volumes:
+      - ./data:/app/data:ro
+      - ./notes:/app/notes:ro
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2
+    container_name: mcp-home-caddy-tailscale
+    restart: unless-stopped
+    depends_on:
+      - mcp-home
+    ports:
+      - "127.0.0.1:8788:80"
+    volumes:
+      - ./Caddyfile.tailscale:/etc/caddy/Caddyfile:ro
+
