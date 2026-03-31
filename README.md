@@ -19,12 +19,15 @@ The initial toolset is intentionally conservative:
 - `get_plex_recently_watched`
 - `get_plex_continue_watching`
 - `get_plex_on_deck`
+- `find_plex_unwatched`
 - `get_plex_item_details`
 - `browse_plex_by_genre`
 - `browse_plex_by_decade`
 - `get_plex_library_stats`
 - `get_plex_show_summary`
 - `get_plex_season_summary`
+- `get_recently_aired_episodes`
+- `find_plex_series_gaps`
 - `list_plex_sections`
 - `browse_plex_show_episodes`
 - `browse_plex_children`
@@ -118,7 +121,7 @@ That script:
 - captures a read-only Docker container snapshot from `docker ps -a`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
-- captures a Plex activity snapshot from local sessions, watch history, continue-watching hubs, and on-deck hubs when a local token is available
+- captures a Plex activity snapshot from local sessions, watch history, continue-watching hubs, on-deck hubs, and unwatched library sections when a local token is available
 - writes:
   - `data/local/windows-host-status.json`
   - `data/local/plex-library-index.json`
@@ -137,12 +140,15 @@ Once you have refreshed the host data, these tools become useful:
 - `get_plex_recently_watched`
 - `get_plex_continue_watching`
 - `get_plex_on_deck`
+- `find_plex_unwatched`
 - `get_plex_item_details`
 - `browse_plex_by_genre`
 - `browse_plex_by_decade`
 - `get_plex_library_stats`
 - `get_plex_show_summary`
 - `get_plex_season_summary`
+- `get_recently_aired_episodes`
+- `find_plex_series_gaps`
 - `list_plex_sections`
 - `browse_plex_show_episodes`
 - `browse_plex_children`

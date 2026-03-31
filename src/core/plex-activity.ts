@@ -6,10 +6,13 @@ export type PlexActivityItem = {
   title: string;
   type: string;
   section?: string | null;
+  year?: number | null;
   grandparentTitle?: string | null;
   parentTitle?: string | null;
   seasonIndex?: number | null;
   episodeIndex?: number | null;
+  leafCount?: number | null;
+  viewedLeafCount?: number | null;
   user?: string | null;
   player?: string | null;
   state?: string | null;
@@ -27,10 +30,12 @@ export type PlexActivitySnapshot = {
   historyAvailable: boolean;
   continueWatchingAvailable: boolean;
   onDeckAvailable: boolean;
+  unwatchedAvailable: boolean;
   activeSessions: PlexActivityItem[];
   recentlyWatched: PlexActivityItem[];
   continueWatching: PlexActivityItem[];
   onDeck: PlexActivityItem[];
+  unwatched: PlexActivityItem[];
 };
 
 const DEFAULT_PLEX_ACTIVITY_PATH = path.resolve(
@@ -73,10 +78,12 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
     typeof candidate.historyAvailable !== "boolean" ||
     typeof candidate.continueWatchingAvailable !== "boolean" ||
     typeof candidate.onDeckAvailable !== "boolean" ||
+    typeof candidate.unwatchedAvailable !== "boolean" ||
     !Array.isArray(candidate.activeSessions) ||
     !Array.isArray(candidate.recentlyWatched) ||
     !Array.isArray(candidate.continueWatching) ||
-    !Array.isArray(candidate.onDeck)
+    !Array.isArray(candidate.onDeck) ||
+    !Array.isArray(candidate.unwatched)
   ) {
     throw new Error("Plex activity snapshot is missing required fields");
   }
@@ -94,6 +101,10 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
   }
 
   for (const item of candidate.onDeck) {
+    assertActivityItem(item);
+  }
+
+  for (const item of candidate.unwatched) {
     assertActivityItem(item);
   }
 }
@@ -127,6 +138,29 @@ function formatProgress(item: PlexActivityItem) {
   }
 
   return `${Math.min(percent, 100)}% watched`;
+}
+
+type PlexUnwatchedOptions = {
+  query?: string;
+  mediaType?: "movie" | "tv";
+  section?: string;
+  limit?: number;
+};
+
+function normalize(value: string | null | undefined) {
+  return value?.trim().toLowerCase();
+}
+
+function matchesUnwatchedMediaType(item: PlexActivityItem, mediaType: PlexUnwatchedOptions["mediaType"]) {
+  if (!mediaType) {
+    return item.type === "movie" || item.type === "show";
+  }
+
+  if (mediaType === "movie") {
+    return item.type === "movie";
+  }
+
+  return item.type === "show";
 }
 
 export function getPlexActivityPath() {
@@ -261,6 +295,86 @@ export function formatPlexOnDeck(snapshot: PlexActivitySnapshot, limit?: number)
   return lines.join("\n");
 }
 
+export function findPlexUnwatched(snapshot: PlexActivitySnapshot, options: PlexUnwatchedOptions) {
+  const query = normalize(options.query);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  return snapshot.unwatched
+    .filter((item) => {
+      if (!matchesUnwatchedMediaType(item, options.mediaType)) {
+        return false;
+      }
+
+      if (section && !normalize(item.section)?.includes(section)) {
+        return false;
+      }
+
+      if (query) {
+        const haystack = [item.title, item.grandparentTitle, item.parentTitle, item.section]
+          .filter((value): value is string => Boolean(value))
+          .join(" ")
+          .toLowerCase();
+        if (!haystack.includes(query)) {
+          return false;
+        }
+      }
+
+      return true;
+    })
+    .sort((left, right) => {
+      const leftYear = left.year ?? 0;
+      const rightYear = right.year ?? 0;
+      if (rightYear !== leftYear) {
+        return rightYear - leftYear;
+      }
+
+      return left.title.localeCompare(right.title);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexUnwatched(
+  items: PlexActivityItem[],
+  snapshot: PlexActivitySnapshot,
+  options: PlexUnwatchedOptions
+) {
+  const qualifiers = [
+    options.mediaType ? `media=${options.mediaType}` : "",
+    options.section ? `section=${options.section}` : "",
+    options.query ? `query=${options.query}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Fetched: ${snapshot.fetchedAt}`,
+    `Token available: ${snapshot.tokenAvailable ? "yes" : "no"}`,
+    `Unwatched endpoint available: ${snapshot.unwatchedAvailable ? "yes" : "no"}`,
+    qualifiers ? `Filters: ${qualifiers}` : "",
+    ""
+  ].filter(Boolean);
+
+  if (items.length === 0) {
+    lines.push("No Plex unwatched items matched that filter.");
+    return lines.join("\n");
+  }
+
+  lines.push("Unwatched:");
+  for (const item of items) {
+    const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
+    const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
+    const section = item.section ? ` | ${item.section}` : "";
+    const year = item.year ? ` | ${item.year}` : "";
+    const episodeCount =
+      item.type === "show" && item.leafCount !== null && item.leafCount !== undefined
+        ? ` | ${item.leafCount} episodes`
+        : "";
+    lines.push(`- ${item.title}${code} | ${item.type}${context}${section}${year}${episodeCount}`);
+  }
+
+  return lines.join("\n");
+}
+
 export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
   const lines = [
     `Fetched: ${snapshot.fetchedAt}`,
@@ -269,6 +383,7 @@ export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
     `Recent history items captured: ${snapshot.recentlyWatched.length}`,
     `Continue-watching items captured: ${snapshot.continueWatching.length}`,
     `On-deck items captured: ${snapshot.onDeck.length}`,
+    `Unwatched items captured: ${snapshot.unwatched.length}`,
     ""
   ];
 

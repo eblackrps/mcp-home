@@ -17,6 +17,7 @@ import {
   browsePlexShowEpisodes,
   browsePlexChildren,
   findPlexEpisodes,
+  findPlexSeriesGaps,
   formatPlexDecadeBrowse,
   formatPlexGenreBrowse,
   formatPlexEpisodes,
@@ -24,9 +25,11 @@ import {
   formatPlexDuplicates,
   formatPlexItemDetails,
   formatPlexLibraryStats,
+  formatPlexSeriesGaps,
   formatPlexSeasonSummary,
   formatPlexShowEpisodes,
   formatPlexShowSummary,
+  formatRecentlyAiredEpisodes,
   formatPlexSearchResults,
   formatPlexTitleSearchResults,
   formatPlexSections,
@@ -35,6 +38,7 @@ import {
   getPlexItemDetails,
   getPlexLibraryStats,
   getPlexSeasonSummary,
+  getRecentlyAiredEpisodes,
   getRecentPlexAdditions,
   listPlexDuplicates,
   readPlexLibraryIndex,
@@ -47,6 +51,8 @@ import {
   formatPlexNowPlaying,
   formatPlexRecentlyWatched,
   formatPlexServerActivity,
+  formatPlexUnwatched,
+  findPlexUnwatched,
   readPlexActivitySnapshot
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
@@ -91,7 +97,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.6"
+    version: "0.2.7"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -410,6 +416,41 @@ export function createServer() {
   );
 
   server.tool(
+    "find_plex_unwatched",
+    "Use this to find unwatched Plex movies or shows from the latest local activity snapshot.",
+    {
+      query: z.string().min(1).optional().describe("Optional title phrase filter for unwatched items"),
+      mediaType: z.enum(["movie", "tv"]).optional().describe("Optional unwatched media filter: movie or tv"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of unwatched items to return, from 1 to 25")
+    },
+    async ({ query, mediaType, section, limit }) => {
+      return withAudit("find_plex_unwatched", { query, mediaType, section, limit }, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          const items = findPlexUnwatched(snapshot, { query, mediaType, section, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexUnwatched(items, snapshot, { query, mediaType, section, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_plex_unwatched returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex unwatched items: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_plex_item_details",
     "Use this to get detailed Plex matches for a specific movie, show, album, artist, track, or episode title.",
     {
@@ -616,6 +657,74 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to summarize Plex season: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_recently_aired_episodes",
+    "Use this to find Plex episodes that aired recently, optionally narrowed to a specific show.",
+    {
+      days: z.number().int().min(1).max(365).optional().describe("Number of days back to search for aired episodes, from 1 to 365"),
+      showTitle: z.string().min(1).optional().describe("Optional show title filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of episodes to return, from 1 to 25")
+    },
+    async ({ days, showTitle, limit }) => {
+      return withAudit("get_recently_aired_episodes", { days, showTitle, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const episodes = getRecentlyAiredEpisodes(index, { days, showTitle, limit });
+
+          return {
+            content: [{ type: "text", text: formatRecentlyAiredEpisodes(episodes, index, { days, showTitle, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_recently_aired_episodes returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to find recently aired Plex episodes: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_plex_series_gaps",
+    "Use this to find potential missing seasons or episode gaps in Plex TV shows.",
+    {
+      showTitle: z.string().min(1).optional().describe("Optional show title filter"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of gap reports to return, from 1 to 25")
+    },
+    async ({ showTitle, section, limit }) => {
+      return withAudit("find_plex_series_gaps", { showTitle, section, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const reports = findPlexSeriesGaps(index, { showTitle, section, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexSeriesGaps(reports, index, { showTitle, section, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_plex_series_gaps returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to detect Plex series gaps: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

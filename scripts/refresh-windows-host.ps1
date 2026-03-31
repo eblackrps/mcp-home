@@ -253,14 +253,41 @@ function Convert-PlexActivityNode {
     }
   }
 
+  $year = $null
+  if ($Node.year) {
+    $parsedYear = 0
+    if ([int]::TryParse([string]$Node.year, [ref]$parsedYear)) {
+      $year = $parsedYear
+    }
+  }
+
+  $leafCount = $null
+  if ($Node.leafCount) {
+    $parsedLeafCount = 0
+    if ([int]::TryParse([string]$Node.leafCount, [ref]$parsedLeafCount)) {
+      $leafCount = $parsedLeafCount
+    }
+  }
+
+  $viewedLeafCount = $null
+  if ($Node.viewedLeafCount) {
+    $parsedViewedLeafCount = 0
+    if ([int]::TryParse([string]$Node.viewedLeafCount, [ref]$parsedViewedLeafCount)) {
+      $viewedLeafCount = $parsedViewedLeafCount
+    }
+  }
+
   return [ordered]@{
     title = [string]$Node.title
     type = [string]$Node.type
     section = if ($Node.librarySectionTitle) { [string]$Node.librarySectionTitle } else { $null }
+    year = $year
     grandparentTitle = if ($Node.grandparentTitle) { [string]$Node.grandparentTitle } else { $null }
     parentTitle = if ($Node.parentTitle) { [string]$Node.parentTitle } else { $null }
     seasonIndex = $seasonIndex
     episodeIndex = $episodeIndex
+    leafCount = $leafCount
+    viewedLeafCount = $viewedLeafCount
     user = if ($Node.User -and $Node.User.title) { [string]$Node.User.title } else { $null }
     player = if ($Node.Player -and $Node.Player.title) { [string]$Node.Player.title } else { $null }
     state = if ($Node.Player -and $Node.Player.state) { [string]$Node.Player.state } else { $null }
@@ -275,17 +302,42 @@ function Convert-PlexActivityNode {
 function Get-PlexActivitySnapshot {
   param(
     [string]$BaseUrl,
-    [string]$Token
+    [string]$Token,
+    [object[]]$Sections
   )
 
   $sessionsXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions") -Token $Token
   $historyXml = $null
   $continueWatchingXml = $null
   $onDeckXml = $null
+  $unwatched = @()
+  $unwatchedAvailable = $false
   if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $historyXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions/history/all?sort=viewedAt:desc") -Token $Token
     $continueWatchingXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/hubs/continueWatching/items?includeGuids=1") -Token $Token
     $onDeckXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/hubs/home/onDeck?includeGuids=1") -Token $Token
+
+    foreach ($section in @($Sections | Where-Object { $_.sectionType -in @("movie", "show") })) {
+      $unwatchedXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/library/sections/" + [string]$section.id + "/unwatched") -Token $Token
+      if (-not $unwatchedXml -or -not $unwatchedXml.MediaContainer) {
+        continue
+      }
+
+      $unwatchedAvailable = $true
+      $sectionItems = @(
+        @($unwatchedXml.MediaContainer.ChildNodes) |
+          Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.title } |
+          Select-Object -First 100 |
+          ForEach-Object {
+            $item = Convert-PlexActivityNode -Node $_
+            if (-not $item.section) {
+              $item["section"] = [string]$section.name
+            }
+            $item
+          }
+      )
+      $unwatched += $sectionItems
+    }
   }
 
   $activeSessions = @()
@@ -334,10 +386,12 @@ function Get-PlexActivitySnapshot {
     historyAvailable = ($null -ne $historyXml)
     continueWatchingAvailable = ($null -ne $continueWatchingXml)
     onDeckAvailable = ($null -ne $onDeckXml)
+    unwatchedAvailable = $unwatchedAvailable
     activeSessions = $activeSessions
     recentlyWatched = $recentHistory
     continueWatching = $continueWatching
     onDeck = $onDeck
+    unwatched = $unwatched
   }
 }
 
@@ -424,7 +478,8 @@ if ($python -and (Test-Path $plexDbPath) -and (Test-Path $pythonScriptPath)) {
   }
 }
 
-$plexActivitySnapshot = Get-PlexActivitySnapshot -BaseUrl $plexLocalUrl -Token $plexToken
+$plexSectionsForActivity = if ($plexIndexSummary) { $plexIndexSummary.sections } else { @() }
+$plexActivitySnapshot = Get-PlexActivitySnapshot -BaseUrl $plexLocalUrl -Token $plexToken -Sections $plexSectionsForActivity
 
 $plexReachable = $null -ne $plexIdentity
 $plexIndexedItems = if ($plexIndexSummary) { [int]$plexIndexSummary.indexedItemCount } else { 0 }

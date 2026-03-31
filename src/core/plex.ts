@@ -117,6 +117,32 @@ type PlexSeasonSummaryOptions = {
   seasonIndex: number;
 };
 
+type PlexRecentlyAiredOptions = {
+  days?: number;
+  showTitle?: string;
+  limit?: number;
+};
+
+type PlexSeriesGapOptions = {
+  showTitle?: string;
+  section?: string;
+  limit?: number;
+};
+
+type PlexSeriesGapReport = {
+  show: PlexLibraryItem;
+  missingSeasons: number[];
+  seasonEpisodeGaps: Array<{
+    seasonIndex: number;
+    missingEpisodes: number[];
+    presentCount: number;
+    highestEpisode: number;
+  }>;
+  episodeCount: number;
+  seasonCount: number;
+  totalMissingCount: number;
+};
+
 const DEFAULT_PLEX_LIBRARY_INDEX_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/plex-library-index.json", import.meta.url))
 );
@@ -268,6 +294,14 @@ function formatDurationCompact(durationMs: number | null | undefined) {
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return minutes > 0 ? `${hours}h ${minutes}m` : `${hours}h`;
+}
+
+function parseTime(value: string | null | undefined) {
+  if (!value) {
+    return NaN;
+  }
+
+  return Date.parse(value);
 }
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -1003,6 +1037,223 @@ export function formatPlexSeasonSummary(
       const code = formatEpisodeCode(episode);
       const addedAt = episode.addedAt ? ` | added ${episode.addedAt}` : "";
       lines.push(`- ${code} ${episode.title}${addedAt}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getRecentlyAiredEpisodes(index: PlexLibraryIndex, options: PlexRecentlyAiredOptions) {
+  const showTitle = normalize(options.showTitle);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+  const days = Math.min(Math.max(options.days ?? 14, 1), 365);
+  const now = Date.now();
+  const windowStart = now - days * 24 * 60 * 60 * 1000;
+
+  return index.items
+    .filter((item) => {
+      if (item.itemType !== "episode") {
+        return false;
+      }
+
+      if (showTitle && !normalize(item.grandparentTitle)?.includes(showTitle)) {
+        return false;
+      }
+
+      const airedAt = parseTime(item.originallyAvailableAt);
+      if (!Number.isFinite(airedAt)) {
+        return false;
+      }
+
+      return airedAt >= windowStart && airedAt <= now;
+    })
+    .sort((left, right) => parseTime(right.originallyAvailableAt) - parseTime(left.originallyAvailableAt))
+    .slice(0, limit);
+}
+
+export function formatRecentlyAiredEpisodes(
+  episodes: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexRecentlyAiredOptions
+) {
+  const days = Math.min(Math.max(options.days ?? 14, 1), 365);
+
+  if (episodes.length === 0) {
+    return options.showTitle
+      ? `No Plex episodes from "${options.showTitle}" aired in the last ${days} days.`
+      : `No Plex episodes aired in the last ${days} days.`;
+  }
+
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    options.showTitle
+      ? `Episodes from "${options.showTitle}" aired in the last ${days} days:`
+      : `Episodes aired in the last ${days} days:`,
+    ""
+  ];
+
+  for (const episode of episodes) {
+    const code = formatEpisodeCode(episode);
+    const showTitle = episode.grandparentTitle ? ` | ${episode.grandparentTitle}` : "";
+    const airedAt = episode.originallyAvailableAt ? ` | aired ${episode.originallyAvailableAt}` : "";
+    const addedAt = episode.addedAt ? ` | added ${episode.addedAt}` : "";
+    lines.push(`- ${code} ${episode.title}${showTitle}${airedAt}${addedAt}`);
+
+    if (episode.summarySnippet) {
+      lines.push(`  ${episode.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function findPlexSeriesGaps(index: PlexLibraryIndex, options: PlexSeriesGapOptions) {
+  const showTitle = normalize(options.showTitle);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  const shows = index.items.filter((item) => {
+    if (item.itemType !== "show") {
+      return false;
+    }
+
+    if (showTitle && !item.title.toLowerCase().includes(showTitle)) {
+      return false;
+    }
+
+    if (section && !item.section.toLowerCase().includes(section)) {
+      return false;
+    }
+
+    return true;
+  });
+
+  const reports: PlexSeriesGapReport[] = [];
+
+  for (const show of shows) {
+    const episodes = index.items.filter(
+      (item) =>
+        item.itemType === "episode" &&
+        normalize(item.grandparentTitle) === normalize(show.title) &&
+        (item.seasonIndex ?? 0) > 0 &&
+        (item.episodeIndex ?? 0) > 0
+    );
+
+    if (episodes.length === 0) {
+      continue;
+    }
+
+    const seasonsPresent = [...new Set(episodes.map((episode) => episode.seasonIndex ?? 0))]
+      .filter((season) => season > 0)
+      .sort((left, right) => left - right);
+
+    if (seasonsPresent.length === 0) {
+      continue;
+    }
+
+    const missingSeasons: number[] = [];
+    for (let season = seasonsPresent[0]; season <= seasonsPresent[seasonsPresent.length - 1]; season += 1) {
+      if (!seasonsPresent.includes(season)) {
+        missingSeasons.push(season);
+      }
+    }
+
+    const seasonEpisodeGaps: PlexSeriesGapReport["seasonEpisodeGaps"] = [];
+    for (const season of seasonsPresent) {
+      const episodeNumbers = [...new Set(
+        episodes
+          .filter((episode) => episode.seasonIndex === season)
+          .map((episode) => episode.episodeIndex ?? 0)
+      )]
+        .filter((episodeNumber) => episodeNumber > 0)
+        .sort((left, right) => left - right);
+
+      if (episodeNumbers.length === 0) {
+        continue;
+      }
+
+      const missingEpisodes: number[] = [];
+      for (let episodeNumber = episodeNumbers[0]; episodeNumber <= episodeNumbers[episodeNumbers.length - 1]; episodeNumber += 1) {
+        if (!episodeNumbers.includes(episodeNumber)) {
+          missingEpisodes.push(episodeNumber);
+        }
+      }
+
+      if (missingEpisodes.length > 0) {
+        seasonEpisodeGaps.push({
+          seasonIndex: season,
+          missingEpisodes,
+          presentCount: episodeNumbers.length,
+          highestEpisode: episodeNumbers[episodeNumbers.length - 1]
+        });
+      }
+    }
+
+    const totalMissingCount =
+      missingSeasons.length + seasonEpisodeGaps.reduce((sum, seasonGap) => sum + seasonGap.missingEpisodes.length, 0);
+    if (totalMissingCount === 0) {
+      continue;
+    }
+
+    reports.push({
+      show,
+      missingSeasons,
+      seasonEpisodeGaps,
+      episodeCount: episodes.length,
+      seasonCount: seasonsPresent.length,
+      totalMissingCount
+    });
+  }
+
+  return reports
+    .sort((left, right) => {
+      if (right.totalMissingCount !== left.totalMissingCount) {
+        return right.totalMissingCount - left.totalMissingCount;
+      }
+
+      return left.show.title.localeCompare(right.show.title);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexSeriesGaps(
+  reports: PlexSeriesGapReport[],
+  index: PlexLibraryIndex,
+  options: PlexSeriesGapOptions
+) {
+  if (reports.length === 0) {
+    return options.showTitle
+      ? `No obvious season or episode numbering gaps were found for "${options.showTitle}".`
+      : "No obvious season or episode numbering gaps were found.";
+  }
+
+  const qualifiers = [options.section ? `section=${options.section}` : "", options.showTitle ? `show=${options.showTitle}` : ""]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    qualifiers ? `Series gaps (${qualifiers}):` : "Series gaps:",
+    ""
+  ];
+
+  for (const report of reports) {
+    lines.push(
+      `- ${report.show.title} | ${report.show.section} | ${report.seasonCount} seasons indexed | ${report.episodeCount} episodes indexed | ${report.totalMissingCount} gaps`
+    );
+
+    if (report.missingSeasons.length > 0) {
+      lines.push(`  Missing seasons: ${report.missingSeasons.map((season) => `S${String(season).padStart(2, "0")}`).join(", ")}`);
+    }
+
+    for (const seasonGap of report.seasonEpisodeGaps.slice(0, 4)) {
+      const missingText = seasonGap.missingEpisodes
+        .slice(0, 12)
+        .map((episode) => `E${String(episode).padStart(2, "0")}`)
+        .join(", ");
+      const suffix = seasonGap.missingEpisodes.length > 12 ? ", ..." : "";
+      lines.push(
+        `  Season ${seasonGap.seasonIndex}: missing ${missingText}${suffix} | present ${seasonGap.presentCount} of ${seasonGap.highestEpisode}`
+      );
     }
   }
 
