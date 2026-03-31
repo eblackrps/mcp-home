@@ -69,6 +69,7 @@ import {
   readPlexActivitySnapshot
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
+import { SERVER_NAME, SERVER_VERSION } from "./server-meta.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
 
@@ -377,8 +378,8 @@ async function withAudit<T>(
 
 export function createServer() {
   const server = new McpServer({
-    name: "mcp-home",
-    version: "0.2.12"
+    name: SERVER_NAME,
+    version: SERVER_VERSION
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;

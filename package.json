@@ -1,6 +1,6 @@
 {
   "name": "mcp-home",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "private": true,
   "type": "module",
   "scripts": {
@@ -15,7 +15,8 @@
     "smoke:http": "tsx scripts/smoke-http.ts",
     "start:http": "node dist/index-http.js",
     "start:stdio": "node dist/index-stdio.js",
-    "typecheck:scripts": "tsc -p tsconfig.scripts.json"
+    "typecheck:scripts": "tsc -p tsconfig.scripts.json",
+    "verify:prod": "npm run build && npm run typecheck:scripts && npm run smoke:http"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

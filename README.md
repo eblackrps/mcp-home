@@ -121,6 +121,19 @@ mcp-home/
    npm run smoke:http
    ```
 
+   The smoke test now auto-detects the first healthy target in this order:
+
+   - `MCP_HEALTH_URL` if you set it
+   - local app HTTP on `127.0.0.1:${PORT}`
+   - local Caddy/Tailscale HTTP on `127.0.0.1:8788`
+   - the origin derived from `MCP_SERVER_URL`
+
+7. Run the production verification bundle when you already have the server up:
+
+   ```powershell
+   npm run verify:prod
+   ```
+
 ## Windows host refresh
 
 The Docker container cannot see Windows services, iCUE, or Plex directly, so the repo now uses a host-side refresh step that writes read-only JSON snapshots into `data/local/`.
@@ -262,6 +275,10 @@ Your reverse proxy must expose these OAuth routes publicly, not just `/mcp`:
 - `/authorize`
 - `/register`
 - `/token`
+
+## Production polish notes
+
+The container image now includes a built-in healthcheck against `/health`, and both Compose files wait for `mcp-home` to become healthy before starting Caddy. This gives you a more reliable startup path for local restarts, rebuilds, and tunnel reconnects.
 - `/revoke`
 - `/oauth/login`
 
