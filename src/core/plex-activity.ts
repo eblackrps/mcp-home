@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 export type PlexActivityItem = {
   title: string;
   type: string;
+  section?: string | null;
   grandparentTitle?: string | null;
   parentTitle?: string | null;
   seasonIndex?: number | null;
@@ -13,6 +14,7 @@ export type PlexActivityItem = {
   player?: string | null;
   state?: string | null;
   viewedAt?: string | null;
+  addedAt?: string | null;
   originallyAvailableAt?: string | null;
   durationMs?: number | null;
   viewOffsetMs?: number | null;
@@ -23,8 +25,10 @@ export type PlexActivitySnapshot = {
   tokenAvailable: boolean;
   sessionsAvailable: boolean;
   historyAvailable: boolean;
+  continueWatchingAvailable: boolean;
   activeSessions: PlexActivityItem[];
   recentlyWatched: PlexActivityItem[];
+  continueWatching: PlexActivityItem[];
 };
 
 const DEFAULT_PLEX_ACTIVITY_PATH = path.resolve(
@@ -65,8 +69,10 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
     typeof candidate.tokenAvailable !== "boolean" ||
     typeof candidate.sessionsAvailable !== "boolean" ||
     typeof candidate.historyAvailable !== "boolean" ||
+    typeof candidate.continueWatchingAvailable !== "boolean" ||
     !Array.isArray(candidate.activeSessions) ||
-    !Array.isArray(candidate.recentlyWatched)
+    !Array.isArray(candidate.recentlyWatched) ||
+    !Array.isArray(candidate.continueWatching)
   ) {
     throw new Error("Plex activity snapshot is missing required fields");
   }
@@ -76,6 +82,10 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
   }
 
   for (const item of candidate.recentlyWatched) {
+    assertActivityItem(item);
+  }
+
+  for (const item of candidate.continueWatching) {
     assertActivityItem(item);
   }
 }
@@ -90,6 +100,25 @@ function formatEpisodeCode(item: PlexActivityItem) {
   }
 
   return `S${String(item.seasonIndex).padStart(2, "0")}E${String(item.episodeIndex).padStart(2, "0")}`;
+}
+
+function formatProgress(item: PlexActivityItem) {
+  if (
+    item.durationMs === null ||
+    item.durationMs === undefined ||
+    item.viewOffsetMs === null ||
+    item.viewOffsetMs === undefined ||
+    item.durationMs <= 0
+  ) {
+    return "";
+  }
+
+  const percent = Math.round((item.viewOffsetMs / item.durationMs) * 100);
+  if (!Number.isFinite(percent) || percent <= 0) {
+    return "";
+  }
+
+  return `${Math.min(percent, 100)}% watched`;
 }
 
 export function getPlexActivityPath() {
@@ -168,12 +197,41 @@ export function formatPlexRecentlyWatched(snapshot: PlexActivitySnapshot, limit?
   return lines.join("\n");
 }
 
+export function formatPlexContinueWatching(snapshot: PlexActivitySnapshot, limit?: number) {
+  const max = Math.min(Math.max(limit ?? 10, 1), 25);
+  const lines = [
+    `Fetched: ${snapshot.fetchedAt}`,
+    `Token available: ${snapshot.tokenAvailable ? "yes" : "no"}`,
+    `Continue-watching endpoint available: ${snapshot.continueWatchingAvailable ? "yes" : "no"}`,
+    ""
+  ];
+
+  if (snapshot.continueWatching.length === 0) {
+    lines.push("No Plex continue-watching items are available.");
+    return lines.join("\n");
+  }
+
+  lines.push("Continue watching:");
+  for (const item of snapshot.continueWatching.slice(0, max)) {
+    const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
+    const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
+    const section = item.section ? ` | ${item.section}` : "";
+    const progress = formatProgress(item);
+    const progressText = progress ? ` | ${progress}` : "";
+    const viewedAt = item.viewedAt ? ` | last watched ${item.viewedAt}` : "";
+    lines.push(`- ${item.title}${code} | ${item.type}${context}${section}${progressText}${viewedAt}`);
+  }
+
+  return lines.join("\n");
+}
+
 export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
   const lines = [
     `Fetched: ${snapshot.fetchedAt}`,
     `Token available: ${snapshot.tokenAvailable ? "yes" : "no"}`,
     `Active sessions: ${snapshot.activeSessions.length}`,
     `Recent history items captured: ${snapshot.recentlyWatched.length}`,
+    `Continue-watching items captured: ${snapshot.continueWatching.length}`,
     ""
   ];
 
@@ -194,6 +252,18 @@ export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
       const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
       const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
       lines.push(`- ${item.title}${code} | ${item.type}${context}`);
+    }
+  }
+
+  if (snapshot.continueWatching.length > 0) {
+    lines.push("");
+    lines.push("Continue-watching preview:");
+    for (const item of snapshot.continueWatching.slice(0, 3)) {
+      const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
+      const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
+      const progress = formatProgress(item);
+      const progressText = progress ? ` | ${progress}` : "";
+      lines.push(`- ${item.title}${code} | ${item.type}${context}${progressText}`);
     }
   }
 

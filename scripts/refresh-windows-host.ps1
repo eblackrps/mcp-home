@@ -256,6 +256,7 @@ function Convert-PlexActivityNode {
   return [ordered]@{
     title = [string]$Node.title
     type = [string]$Node.type
+    section = if ($Node.librarySectionTitle) { [string]$Node.librarySectionTitle } else { $null }
     grandparentTitle = if ($Node.grandparentTitle) { [string]$Node.grandparentTitle } else { $null }
     parentTitle = if ($Node.parentTitle) { [string]$Node.parentTitle } else { $null }
     seasonIndex = $seasonIndex
@@ -263,7 +264,8 @@ function Convert-PlexActivityNode {
     user = if ($Node.User -and $Node.User.title) { [string]$Node.User.title } else { $null }
     player = if ($Node.Player -and $Node.Player.title) { [string]$Node.Player.title } else { $null }
     state = if ($Node.Player -and $Node.Player.state) { [string]$Node.Player.state } else { $null }
-    viewedAt = if ($Node.viewedAt) { Convert-PlexDateValue -Value ([string]$Node.viewedAt) } else { $null }
+    viewedAt = if ($Node.viewedAt) { Convert-PlexDateValue -Value ([string]$Node.viewedAt) } elseif ($Node.lastViewedAt) { Convert-PlexDateValue -Value ([string]$Node.lastViewedAt) } else { $null }
+    addedAt = if ($Node.addedAt) { Convert-PlexDateValue -Value ([string]$Node.addedAt) } else { $null }
     originallyAvailableAt = if ($Node.originallyAvailableAt) { Convert-PlexDateValue -Value ([string]$Node.originallyAvailableAt) } else { $null }
     durationMs = $durationMs
     viewOffsetMs = $viewOffsetMs
@@ -278,8 +280,10 @@ function Get-PlexActivitySnapshot {
 
   $sessionsXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions") -Token $Token
   $historyXml = $null
+  $continueWatchingXml = $null
   if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $historyXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions/history/all?sort=viewedAt:desc") -Token $Token
+    $continueWatchingXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/hubs/continueWatching/items?includeGuids=1") -Token $Token
   }
 
   $activeSessions = @()
@@ -301,13 +305,25 @@ function Get-PlexActivitySnapshot {
     )
   }
 
+  $continueWatching = @()
+  if ($continueWatchingXml -and $continueWatchingXml.MediaContainer) {
+    $continueWatching = @(
+      @($continueWatchingXml.MediaContainer.ChildNodes) |
+        Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.title } |
+        Select-Object -First 25 |
+        ForEach-Object { Convert-PlexActivityNode -Node $_ }
+    )
+  }
+
   return [ordered]@{
     fetchedAt = Get-IsoNow
     tokenAvailable = -not [string]::IsNullOrWhiteSpace($Token)
     sessionsAvailable = ($null -ne $sessionsXml)
     historyAvailable = ($null -ne $historyXml)
+    continueWatchingAvailable = ($null -ne $continueWatchingXml)
     activeSessions = $activeSessions
     recentlyWatched = $recentHistory
+    continueWatching = $continueWatching
   }
 }
 

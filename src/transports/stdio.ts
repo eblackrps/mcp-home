@@ -7,7 +7,7 @@ export async function startStdio() {
   const transport = new StdioServerTransport();
 
   log(
-    "starting stdio transport with tools ping, get_time, get_homelab_status, get_host_status, get_docker_status, list_docker_containers, get_plex_status, get_plex_server_activity, get_plex_now_playing, get_plex_recently_watched, get_plex_item_details, get_plex_show_summary, list_plex_sections, browse_plex_show_episodes, browse_plex_children, find_plex_episode, search_plex_library, search_plex_titles, list_plex_duplicates, get_recent_plex_additions, list_notes, search_notes, read_note"
+    "starting stdio transport with tools ping, get_time, get_homelab_status, get_host_status, get_docker_status, list_docker_containers, get_plex_status, get_plex_server_activity, get_plex_now_playing, get_plex_recently_watched, get_plex_continue_watching, get_plex_item_details, browse_plex_by_genre, get_plex_library_stats, get_plex_show_summary, list_plex_sections, browse_plex_show_episodes, browse_plex_children, find_plex_episode, search_plex_library, search_plex_titles, list_plex_duplicates, get_recent_plex_additions, list_notes, search_notes, read_note"
   );
   await server.connect(transport);
 }

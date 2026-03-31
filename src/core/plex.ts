@@ -92,6 +92,19 @@ type PlexEpisodeSearchOptions = {
   limit?: number;
 };
 
+type PlexGenreBrowseOptions = {
+  genre: string;
+  mediaType?: "movie" | "tv" | "audio";
+  section?: string;
+  limit?: number;
+};
+
+type PlexLibraryStatsOptions = {
+  mediaType?: "movie" | "tv" | "audio";
+  section?: string;
+  topGenreLimit?: number;
+};
+
 const DEFAULT_PLEX_LIBRARY_INDEX_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/plex-library-index.json", import.meta.url))
 );
@@ -257,6 +270,58 @@ function matchesTitleMediaType(item: PlexLibraryItem, mediaType: PlexTitleSearch
   return item.itemType === "artist" || item.itemType === "album" || item.itemType === "track";
 }
 
+function matchesGenreBrowseMediaType(item: PlexLibraryItem, mediaType: PlexGenreBrowseOptions["mediaType"]) {
+  if (!mediaType) {
+    return item.itemType === "movie" || item.itemType === "show" || item.itemType === "album";
+  }
+
+  if (mediaType === "movie") {
+    return item.itemType === "movie";
+  }
+
+  if (mediaType === "tv") {
+    return item.itemType === "show";
+  }
+
+  return item.itemType === "album";
+}
+
+function matchesLibraryStatsMediaType(item: PlexLibraryItem, mediaType: PlexLibraryStatsOptions["mediaType"]) {
+  if (!mediaType) {
+    return true;
+  }
+
+  if (mediaType === "movie") {
+    return item.itemType === "movie";
+  }
+
+  if (mediaType === "tv") {
+    return item.itemType === "show" || item.itemType === "season" || item.itemType === "episode";
+  }
+
+  return item.itemType === "artist" || item.itemType === "album" || item.itemType === "track";
+}
+
+function scoreGenreMatch(item: PlexLibraryItem, genreQuery: string) {
+  if (!item.genres || item.genres.length === 0) {
+    return 0;
+  }
+
+  let score = 0;
+  for (const genre of item.genres) {
+    const normalizedGenre = genre.toLowerCase();
+    if (normalizedGenre === genreQuery) {
+      score = Math.max(score, 200);
+    } else if (normalizedGenre.startsWith(genreQuery)) {
+      score = Math.max(score, 150);
+    } else if (normalizedGenre.includes(genreQuery)) {
+      score = Math.max(score, 100);
+    }
+  }
+
+  return score;
+}
+
 function byNewestAddedAt(left: PlexLibraryItem, right: PlexLibraryItem) {
   const leftTime = left.addedAt ? Date.parse(left.addedAt) : 0;
   const rightTime = right.addedAt ? Date.parse(right.addedAt) : 0;
@@ -401,6 +466,80 @@ export function formatPlexTitleSearchResults(
     const context = formatContext(item);
     if (context) {
       lines.push(`  Context: ${context}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function browsePlexByGenre(index: PlexLibraryIndex, options: PlexGenreBrowseOptions) {
+  const genreQuery = normalize(options.genre);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  if (!genreQuery) {
+    return [];
+  }
+
+  return index.items
+    .filter((item) => {
+      if (!matchesGenreBrowseMediaType(item, options.mediaType)) {
+        return false;
+      }
+
+      if (section && !item.section.toLowerCase().includes(section)) {
+        return false;
+      }
+
+      return scoreGenreMatch(item, genreQuery) > 0;
+    })
+    .sort((left, right) => {
+      const leftScore = scoreGenreMatch(left, genreQuery);
+      const rightScore = scoreGenreMatch(right, genreQuery);
+      if (rightScore !== leftScore) {
+        return rightScore - leftScore;
+      }
+
+      return byNewestAddedAt(left, right);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexGenreBrowse(
+  results: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexGenreBrowseOptions
+) {
+  if (results.length === 0) {
+    const mediaText = options.mediaType ? ` in ${options.mediaType}` : "";
+    return `No Plex items matched genre "${options.genre}"${mediaText}.`;
+  }
+
+  const qualifiers = [options.mediaType ? `media=${options.mediaType}` : "", options.section ? `section=${options.section}` : ""]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    qualifiers ? `Genre matches for "${options.genre}" (${qualifiers}):` : `Genre matches for "${options.genre}":`,
+    ""
+  ];
+
+  for (const item of results) {
+    const year = item.year ? ` | ${item.year}` : "";
+    const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
+    lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
+
+    const context = formatContext(item);
+    if (context) {
+      lines.push(`  Context: ${context}`);
+    }
+
+    if (item.genres && item.genres.length > 0) {
+      lines.push(`  Genres: ${item.genres.join(", ")}`);
+    }
+
+    if (item.summarySnippet) {
+      lines.push(`  ${item.summarySnippet}`);
     }
   }
 
@@ -774,6 +913,150 @@ export function formatPlexEpisodes(
 
     if (episode.summarySnippet) {
       lines.push(`  ${episode.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getPlexLibraryStats(index: PlexLibraryIndex, options: PlexLibraryStatsOptions) {
+  const section = normalize(options.section);
+  const filteredItems = index.items.filter((item) => {
+    if (section && !item.section.toLowerCase().includes(section)) {
+      return false;
+    }
+
+    return matchesLibraryStatsMediaType(item, options.mediaType);
+  });
+
+  const countsByType = [...filteredItems.reduce((map, item) => {
+    map.set(item.itemType, (map.get(item.itemType) ?? 0) + 1);
+    return map;
+  }, new Map<string, number>()).entries()]
+    .map(([itemType, count]) => ({ itemType, count }))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+
+      return left.itemType.localeCompare(right.itemType);
+    });
+
+  const countsBySection = [...filteredItems.reduce((map, item) => {
+    map.set(item.section, (map.get(item.section) ?? 0) + 1);
+    return map;
+  }, new Map<string, number>()).entries()]
+    .map(([name, count]) => ({ name, count }))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+
+      return left.name.localeCompare(right.name);
+    });
+
+  const topGenreLimit = Math.min(Math.max(options.topGenreLimit ?? 8, 1), 20);
+  const genreCounts = [...filteredItems
+    .filter((item) => item.itemType === "movie" || item.itemType === "show" || item.itemType === "album")
+    .reduce((map, item) => {
+      for (const genre of item.genres ?? []) {
+        map.set(genre, (map.get(genre) ?? 0) + 1);
+      }
+      return map;
+    }, new Map<string, number>()).entries()]
+    .map(([genre, count]) => ({ genre, count }))
+    .sort((left, right) => {
+      if (right.count !== left.count) {
+        return right.count - left.count;
+      }
+
+      return left.genre.localeCompare(right.genre);
+    })
+    .slice(0, topGenreLimit);
+
+  const duplicateCandidateItems = filteredItems.filter(
+    (item) => item.itemType !== "episode" && item.itemType !== "track" && item.itemType !== "season"
+  );
+
+  const duplicateGroups = [...duplicateCandidateItems.reduce((map, item) => {
+    const key = [normalizeTitleKey(item.title), item.itemType.toLowerCase(), item.section.toLowerCase()].join("|");
+    const existing = map.get(key);
+    if (existing) {
+      existing.push(item);
+    } else {
+      map.set(key, [item]);
+    }
+    return map;
+  }, new Map<string, PlexLibraryItem[]>()).values()].filter((group) => group.length > 1);
+
+  const years = filteredItems
+    .map((item) => item.year)
+    .filter((year): year is number => typeof year === "number" && Number.isFinite(year));
+
+  const recentAdditions = filteredItems
+    .filter((item) => item.addedAt)
+    .sort(byNewestAddedAt)
+    .slice(0, 5);
+
+  return {
+    filteredItems,
+    countsByType,
+    countsBySection,
+    genreCounts,
+    duplicateGroupCount: duplicateGroups.length,
+    yearRange:
+      years.length > 0
+        ? {
+            min: Math.min(...years),
+            max: Math.max(...years)
+          }
+        : undefined,
+    recentAdditions
+  };
+}
+
+export function formatPlexLibraryStats(
+  stats: ReturnType<typeof getPlexLibraryStats>,
+  index: PlexLibraryIndex,
+  options: PlexLibraryStatsOptions
+) {
+  const qualifiers = [options.mediaType ? `media=${options.mediaType}` : "", options.section ? `section=${options.section}` : ""]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    qualifiers ? `Plex library stats (${qualifiers}):` : "Plex library stats:",
+    "",
+    `- Total indexed items: ${stats.filteredItems.length}`,
+    `- Sections represented: ${stats.countsBySection.length}`,
+    `- Top-level duplicate groups: ${stats.duplicateGroupCount}`
+  ];
+
+  if (stats.yearRange) {
+    lines.push(`- Year range: ${stats.yearRange.min} to ${stats.yearRange.max}`);
+  }
+
+  lines.push("");
+  lines.push("Item types:");
+  for (const entry of stats.countsByType.slice(0, 8)) {
+    lines.push(`- ${entry.itemType}: ${entry.count}`);
+  }
+
+  if (stats.genreCounts.length > 0) {
+    lines.push("");
+    lines.push("Top genres:");
+    for (const entry of stats.genreCounts) {
+      lines.push(`- ${entry.genre}: ${entry.count}`);
+    }
+  }
+
+  if (stats.recentAdditions.length > 0) {
+    lines.push("");
+    lines.push("Recent additions:");
+    for (const item of stats.recentAdditions) {
+      const year = item.year ? ` | ${item.year}` : "";
+      const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
+      lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
     }
   }
 

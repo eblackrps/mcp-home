@@ -12,13 +12,16 @@ import {
 } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
+  browsePlexByGenre,
   browsePlexShowEpisodes,
   browsePlexChildren,
   findPlexEpisodes,
+  formatPlexGenreBrowse,
   formatPlexEpisodes,
   formatPlexChildren,
   formatPlexDuplicates,
   formatPlexItemDetails,
+  formatPlexLibraryStats,
   formatPlexShowEpisodes,
   formatPlexShowSummary,
   formatPlexSearchResults,
@@ -27,6 +30,7 @@ import {
   formatRecentPlexAdditions,
   getPlexShowSummary,
   getPlexItemDetails,
+  getPlexLibraryStats,
   getRecentPlexAdditions,
   listPlexDuplicates,
   readPlexLibraryIndex,
@@ -34,6 +38,7 @@ import {
   searchPlexTitles
 } from "./plex.js";
 import {
+  formatPlexContinueWatching,
   formatPlexNowPlaying,
   formatPlexRecentlyWatched,
   formatPlexServerActivity,
@@ -81,7 +86,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.4"
+    version: "0.2.5"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -340,6 +345,36 @@ export function createServer() {
   );
 
   server.tool(
+    "get_plex_continue_watching",
+    "Use this to list Plex continue-watching recommendations from the latest local activity snapshot.",
+    {
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of continue-watching items to return, from 1 to 25")
+    },
+    async ({ limit }) => {
+      return withAudit("get_plex_continue_watching", { limit }, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          return {
+            content: [{ type: "text", text: formatPlexContinueWatching(snapshot, limit) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_continue_watching returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex continue-watching items: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_plex_item_details",
     "Use this to get detailed Plex matches for a specific movie, show, album, artist, track, or episode title.",
     {
@@ -368,6 +403,81 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to read Plex item details: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "browse_plex_by_genre",
+    "Use this to browse Plex movies, shows, or albums by genre.",
+    {
+      genre: z.string().min(1).describe("Genre name or phrase to browse for, for example science fiction or audiobook"),
+      mediaType: z
+        .enum(["movie", "tv", "audio"])
+        .optional()
+        .describe("Optional media filter: movie for films, tv for series, or audio for albums"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matching items to return, from 1 to 25")
+    },
+    async ({ genre, mediaType, section, limit }) => {
+      return withAudit("browse_plex_by_genre", { genre, mediaType, section, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = browsePlexByGenre(index, { genre, mediaType, section, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexGenreBrowse(results, index, { genre, mediaType, section, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool browse_plex_by_genre returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to browse Plex by genre: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_plex_library_stats",
+    "Use this to summarize Plex library counts, top genres, duplicate groups, and recent additions.",
+    {
+      mediaType: z
+        .enum(["movie", "tv", "audio"])
+        .optional()
+        .describe("Optional media filter: movie, tv, or audio"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      topGenreLimit: z.number().int().min(1).max(20).optional().describe("Maximum number of top genres to report, from 1 to 20")
+    },
+    async ({ mediaType, section, topGenreLimit }) => {
+      return withAudit("get_plex_library_stats", { mediaType, section, topGenreLimit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const stats = getPlexLibraryStats(index, { mediaType, section, topGenreLimit });
+
+          return {
+            content: [{ type: "text", text: formatPlexLibraryStats(stats, index, { mediaType, section, topGenreLimit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_library_stats returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Plex library stats: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
