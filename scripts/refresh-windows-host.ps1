@@ -281,9 +281,11 @@ function Get-PlexActivitySnapshot {
   $sessionsXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions") -Token $Token
   $historyXml = $null
   $continueWatchingXml = $null
+  $onDeckXml = $null
   if (-not [string]::IsNullOrWhiteSpace($Token)) {
     $historyXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions/history/all?sort=viewedAt:desc") -Token $Token
     $continueWatchingXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/hubs/continueWatching/items?includeGuids=1") -Token $Token
+    $onDeckXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/hubs/home/onDeck?includeGuids=1") -Token $Token
   }
 
   $activeSessions = @()
@@ -315,15 +317,27 @@ function Get-PlexActivitySnapshot {
     )
   }
 
+  $onDeck = @()
+  if ($onDeckXml -and $onDeckXml.MediaContainer) {
+    $onDeck = @(
+      @($onDeckXml.MediaContainer.ChildNodes) |
+        Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.title } |
+        Select-Object -First 25 |
+        ForEach-Object { Convert-PlexActivityNode -Node $_ }
+    )
+  }
+
   return [ordered]@{
     fetchedAt = Get-IsoNow
     tokenAvailable = -not [string]::IsNullOrWhiteSpace($Token)
     sessionsAvailable = ($null -ne $sessionsXml)
     historyAvailable = ($null -ne $historyXml)
     continueWatchingAvailable = ($null -ne $continueWatchingXml)
+    onDeckAvailable = ($null -ne $onDeckXml)
     activeSessions = $activeSessions
     recentlyWatched = $recentHistory
     continueWatching = $continueWatching
+    onDeck = $onDeck
   }
 }
 

@@ -26,9 +26,11 @@ export type PlexActivitySnapshot = {
   sessionsAvailable: boolean;
   historyAvailable: boolean;
   continueWatchingAvailable: boolean;
+  onDeckAvailable: boolean;
   activeSessions: PlexActivityItem[];
   recentlyWatched: PlexActivityItem[];
   continueWatching: PlexActivityItem[];
+  onDeck: PlexActivityItem[];
 };
 
 const DEFAULT_PLEX_ACTIVITY_PATH = path.resolve(
@@ -70,9 +72,11 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
     typeof candidate.sessionsAvailable !== "boolean" ||
     typeof candidate.historyAvailable !== "boolean" ||
     typeof candidate.continueWatchingAvailable !== "boolean" ||
+    typeof candidate.onDeckAvailable !== "boolean" ||
     !Array.isArray(candidate.activeSessions) ||
     !Array.isArray(candidate.recentlyWatched) ||
-    !Array.isArray(candidate.continueWatching)
+    !Array.isArray(candidate.continueWatching) ||
+    !Array.isArray(candidate.onDeck)
   ) {
     throw new Error("Plex activity snapshot is missing required fields");
   }
@@ -86,6 +90,10 @@ function assertSnapshot(value: unknown): asserts value is PlexActivitySnapshot {
   }
 
   for (const item of candidate.continueWatching) {
+    assertActivityItem(item);
+  }
+
+  for (const item of candidate.onDeck) {
     assertActivityItem(item);
   }
 }
@@ -225,6 +233,34 @@ export function formatPlexContinueWatching(snapshot: PlexActivitySnapshot, limit
   return lines.join("\n");
 }
 
+export function formatPlexOnDeck(snapshot: PlexActivitySnapshot, limit?: number) {
+  const max = Math.min(Math.max(limit ?? 10, 1), 25);
+  const lines = [
+    `Fetched: ${snapshot.fetchedAt}`,
+    `Token available: ${snapshot.tokenAvailable ? "yes" : "no"}`,
+    `On-deck endpoint available: ${snapshot.onDeckAvailable ? "yes" : "no"}`,
+    ""
+  ];
+
+  if (snapshot.onDeck.length === 0) {
+    lines.push("No Plex on-deck items are available.");
+    return lines.join("\n");
+  }
+
+  lines.push("On deck:");
+  for (const item of snapshot.onDeck.slice(0, max)) {
+    const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
+    const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
+    const section = item.section ? ` | ${item.section}` : "";
+    const progress = formatProgress(item);
+    const progressText = progress ? ` | ${progress}` : "";
+    const airDate = item.originallyAvailableAt ? ` | aired ${item.originallyAvailableAt}` : "";
+    lines.push(`- ${item.title}${code} | ${item.type}${context}${section}${progressText}${airDate}`);
+  }
+
+  return lines.join("\n");
+}
+
 export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
   const lines = [
     `Fetched: ${snapshot.fetchedAt}`,
@@ -232,6 +268,7 @@ export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
     `Active sessions: ${snapshot.activeSessions.length}`,
     `Recent history items captured: ${snapshot.recentlyWatched.length}`,
     `Continue-watching items captured: ${snapshot.continueWatching.length}`,
+    `On-deck items captured: ${snapshot.onDeck.length}`,
     ""
   ];
 
@@ -259,6 +296,18 @@ export function formatPlexServerActivity(snapshot: PlexActivitySnapshot) {
     lines.push("");
     lines.push("Continue-watching preview:");
     for (const item of snapshot.continueWatching.slice(0, 3)) {
+      const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
+      const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
+      const progress = formatProgress(item);
+      const progressText = progress ? ` | ${progress}` : "";
+      lines.push(`- ${item.title}${code} | ${item.type}${context}${progressText}`);
+    }
+  }
+
+  if (snapshot.onDeck.length > 0) {
+    lines.push("");
+    lines.push("On-deck preview:");
+    for (const item of snapshot.onDeck.slice(0, 3)) {
       const code = item.type === "episode" ? ` ${formatEpisodeCode(item)}` : "";
       const context = item.grandparentTitle ? ` | ${item.grandparentTitle}` : item.parentTitle ? ` | ${item.parentTitle}` : "";
       const progress = formatProgress(item);

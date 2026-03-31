@@ -13,15 +13,18 @@ import {
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
   browsePlexByGenre,
+  browsePlexByDecade,
   browsePlexShowEpisodes,
   browsePlexChildren,
   findPlexEpisodes,
+  formatPlexDecadeBrowse,
   formatPlexGenreBrowse,
   formatPlexEpisodes,
   formatPlexChildren,
   formatPlexDuplicates,
   formatPlexItemDetails,
   formatPlexLibraryStats,
+  formatPlexSeasonSummary,
   formatPlexShowEpisodes,
   formatPlexShowSummary,
   formatPlexSearchResults,
@@ -31,6 +34,7 @@ import {
   getPlexShowSummary,
   getPlexItemDetails,
   getPlexLibraryStats,
+  getPlexSeasonSummary,
   getRecentPlexAdditions,
   listPlexDuplicates,
   readPlexLibraryIndex,
@@ -39,6 +43,7 @@ import {
 } from "./plex.js";
 import {
   formatPlexContinueWatching,
+  formatPlexOnDeck,
   formatPlexNowPlaying,
   formatPlexRecentlyWatched,
   formatPlexServerActivity,
@@ -86,7 +91,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.5"
+    version: "0.2.6"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -375,6 +380,36 @@ export function createServer() {
   );
 
   server.tool(
+    "get_plex_on_deck",
+    "Use this to list Plex on-deck recommendations from the latest local activity snapshot.",
+    {
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of on-deck items to return, from 1 to 25")
+    },
+    async ({ limit }) => {
+      return withAudit("get_plex_on_deck", { limit }, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          return {
+            content: [{ type: "text", text: formatPlexOnDeck(snapshot, limit) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_on_deck returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex on-deck items: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_plex_item_details",
     "Use this to get detailed Plex matches for a specific movie, show, album, artist, track, or episode title.",
     {
@@ -451,6 +486,44 @@ export function createServer() {
   );
 
   server.tool(
+    "browse_plex_by_decade",
+    "Use this to browse Plex movies, shows, or albums from a specific decade.",
+    {
+      decade: z.number().int().describe("Decade to browse, for example 1990 or 2000"),
+      mediaType: z
+        .enum(["movie", "tv", "audio"])
+        .optional()
+        .describe("Optional media filter: movie for films, tv for series, or audio for albums"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matching items to return, from 1 to 25")
+    },
+    async ({ decade, mediaType, section, limit }) => {
+      return withAudit("browse_plex_by_decade", { decade, mediaType, section, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = browsePlexByDecade(index, { decade, mediaType, section, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexDecadeBrowse(results, index, { decade, mediaType, section, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool browse_plex_by_decade returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to browse Plex by decade: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_plex_library_stats",
     "Use this to summarize Plex library counts, top genres, duplicate groups, and recent additions.",
     {
@@ -510,6 +583,39 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to summarize Plex show: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_plex_season_summary",
+    "Use this to summarize a specific Plex TV season with episode counts, runtime, and air-date range.",
+    {
+      showTitle: z.string().min(1).describe("The show title to summarize"),
+      seasonIndex: z.number().int().min(1).describe("Season number to summarize")
+    },
+    async ({ showTitle, seasonIndex }) => {
+      return withAudit("get_plex_season_summary", { showTitle, seasonIndex }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const summary = getPlexSeasonSummary(index, { showTitle, seasonIndex });
+
+          return {
+            content: [{ type: "text", text: formatPlexSeasonSummary(summary, index, { showTitle, seasonIndex }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_season_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Plex season: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
