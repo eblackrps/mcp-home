@@ -129,6 +129,30 @@ type PlexSeriesGapOptions = {
   limit?: number;
 };
 
+export type PlexFindIntent = "auto" | "details" | "summary" | "episodes" | "episode_search";
+
+export type PlexFindOptions = {
+  query: string;
+  mediaType?: "movie" | "tv" | "audio";
+  intent?: PlexFindIntent;
+  section?: string;
+  seasonIndex?: number;
+  limit?: number;
+};
+
+type PlexFindMode = "details" | "summary" | "episodes" | "episode_search" | "search";
+
+export type PlexFindResult = {
+  resolvedIntent: PlexFindMode;
+  requestedIntent: PlexFindIntent;
+  queryUsed: string;
+  seasonIndex?: number;
+  titleMatches: PlexLibraryItem[];
+  episodeMatches: PlexLibraryItem[];
+  searchMatches: PlexLibraryItem[];
+  matchedShowTitle?: string;
+};
+
 type PlexSeriesGapReport = {
   show: PlexLibraryItem;
   missingSeasons: number[];
@@ -230,6 +254,10 @@ function normalizeTitleKey(value: string | undefined) {
     .trim();
 }
 
+function normalizeLooseTitleKey(value: string | undefined) {
+  return normalizeTitleKey(value)?.replace(/^(the|a|an)\s+/, "");
+}
+
 function buildSearchHaystack(item: PlexLibraryItem) {
   return [item.title, item.parentTitle, item.grandparentTitle, item.section]
     .filter((value): value is string => Boolean(value))
@@ -306,6 +334,162 @@ function parseTime(value: string | null | undefined) {
 
 function uniqueStrings(values: Array<string | null | undefined>) {
   return [...new Set(values.filter((value): value is string => Boolean(value && value.trim())))]
+}
+
+function buildLibraryItemKey(item: PlexLibraryItem) {
+  return `${item.ratingKey ?? "na"}|${item.itemType}|${item.section}|${item.title}|${item.parentTitle ?? ""}|${item.grandparentTitle ?? ""}`;
+}
+
+function dedupeLibraryItems(items: PlexLibraryItem[]) {
+  const seen = new Set<string>();
+  const deduped: PlexLibraryItem[] = [];
+
+  for (const item of items) {
+    const key = buildLibraryItemKey(item);
+    if (seen.has(key)) {
+      continue;
+    }
+
+    seen.add(key);
+    deduped.push(item);
+  }
+
+  return deduped;
+}
+
+function stripLeadingMetadata(text: string) {
+  const lines = text.split("\n");
+
+  while (lines.length > 0 && (lines[0].startsWith("Generated:") || lines[0].startsWith("Fetched:"))) {
+    lines.shift();
+  }
+
+  while (lines.length > 0 && lines[0].trim() === "") {
+    lines.shift();
+  }
+
+  while (lines.length > 0 && lines[lines.length - 1].trim() === "") {
+    lines.pop();
+  }
+
+  return lines.join("\n");
+}
+
+function appendSection(lines: string[], title: string, body: string) {
+  const trimmedBody = stripLeadingMetadata(body);
+  if (!trimmedBody) {
+    return;
+  }
+
+  lines.push(title);
+  lines.push(trimmedBody);
+  lines.push("");
+}
+
+function parseSeasonIndexFromQuery(rawQuery: string, explicitSeasonIndex?: number) {
+  if (explicitSeasonIndex !== undefined) {
+    return { query: rawQuery.trim(), seasonIndex: explicitSeasonIndex };
+  }
+
+  const seasonMatch = rawQuery.match(/\bseason\s+(\d{1,2})\b/i);
+  if (!seasonMatch) {
+    return { query: rawQuery.trim(), seasonIndex: undefined };
+  }
+
+  const parsed = Number(seasonMatch[1]);
+  const cleaned = rawQuery.replace(seasonMatch[0], " ").replace(/\s+/g, " ").trim();
+  return {
+    query: cleaned || rawQuery.trim(),
+    seasonIndex: Number.isFinite(parsed) ? parsed : undefined
+  };
+}
+
+function stripNaturalQueryNoise(rawQuery: string) {
+  return rawQuery
+    .replace(/\b(tv show|show|series|movie|film|album|artist|track|song|episode|episodes)\b/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function buildFindQueries(rawQuery: string, seasonIndex?: number) {
+  const parsed = parseSeasonIndexFromQuery(rawQuery, seasonIndex);
+  const cleaned = stripNaturalQueryNoise(parsed.query);
+
+  return {
+    seasonIndex: parsed.seasonIndex,
+    queries: uniqueStrings([rawQuery.trim(), parsed.query, cleaned])
+  };
+}
+
+function findTitleMatches(
+  index: PlexLibraryIndex,
+  query: string,
+  options: Pick<PlexFindOptions, "mediaType" | "section" | "limit">
+) {
+  const normalizedQuery = normalize(query);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  if (!normalizedQuery) {
+    return [];
+  }
+
+  return index.items
+    .filter((item) => {
+      if (section && !item.section.toLowerCase().includes(section)) {
+        return false;
+      }
+
+      if (options.mediaType && !matchesTitleMediaType(item, options.mediaType)) {
+        return false;
+      }
+
+      return item.title.toLowerCase().includes(normalizedQuery);
+    })
+    .sort((left, right) => sortByRelevance(left, right, normalizedQuery))
+    .slice(0, limit);
+}
+
+function runFirstPopulatedQuery(
+  queries: string[],
+  resolver: (query: string) => PlexLibraryItem[]
+) {
+  let fallbackQuery = queries[0] ?? "";
+
+  for (const query of queries) {
+    fallbackQuery = query;
+    const results = resolver(query);
+    if (results.length > 0) {
+      return { queryUsed: query, results };
+    }
+  }
+
+  return { queryUsed: fallbackQuery, results: [] as PlexLibraryItem[] };
+}
+
+function isStrongTitleMatch(query: string, item: PlexLibraryItem | undefined) {
+  if (!item) {
+    return false;
+  }
+
+  const queryKey = normalizeLooseTitleKey(query);
+  const titleKey = normalizeLooseTitleKey(item.title);
+  if (!queryKey || !titleKey) {
+    return false;
+  }
+
+  return titleKey === queryKey || titleKey.startsWith(`${queryKey} `) || queryKey.startsWith(`${titleKey} `);
+}
+
+function pickShowCandidate(query: string, titleMatches: PlexLibraryItem[]) {
+  const exactShowMatch = titleMatches.find(
+    (item) => item.itemType === "show" && normalizeLooseTitleKey(item.title) === normalizeLooseTitleKey(query)
+  );
+  if (exactShowMatch) {
+    return exactShowMatch;
+  }
+
+  return titleMatches.find((item) => item.itemType === "show");
 }
 
 function sortByRelevance(left: PlexLibraryItem, right: PlexLibraryItem, query: string) {
@@ -547,6 +731,287 @@ export function formatPlexTitleSearchResults(
   }
 
   return lines.join("\n");
+}
+
+export function findPlex(index: PlexLibraryIndex, options: PlexFindOptions): PlexFindResult {
+  const requestedIntent = options.intent ?? "auto";
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+  const { queries, seasonIndex } = buildFindQueries(options.query, options.seasonIndex);
+
+  const titleLookup = runFirstPopulatedQuery(queries, (query) =>
+    findTitleMatches(index, query, {
+      mediaType: options.mediaType,
+      section: options.section,
+      limit
+    })
+  );
+  const titleMatches = dedupeLibraryItems(titleLookup.results).slice(0, limit);
+  const showCandidate = pickShowCandidate(titleLookup.queryUsed, titleMatches);
+
+  const episodeSearchLookup = runFirstPopulatedQuery(queries, (query) =>
+    findPlexEpisodes(index, {
+      query,
+      showTitle: requestedIntent === "episode_search" ? undefined : showCandidate?.title,
+      limit
+    })
+  );
+  const episodeMatches = dedupeLibraryItems(episodeSearchLookup.results).slice(0, limit);
+
+  const librarySearchLookup = runFirstPopulatedQuery(queries, (query) =>
+    searchPlexLibrary(index, {
+      query,
+      section: options.section,
+      limit
+    })
+  );
+  const searchMatches = dedupeLibraryItems(librarySearchLookup.results).slice(0, limit);
+
+  if (requestedIntent === "summary") {
+    if (showCandidate) {
+      return {
+        resolvedIntent: "summary",
+        requestedIntent,
+        queryUsed: titleLookup.queryUsed,
+        seasonIndex,
+        titleMatches,
+        episodeMatches,
+        searchMatches,
+        matchedShowTitle: showCandidate.title
+      };
+    }
+
+    return {
+      resolvedIntent: titleMatches.length > 0 ? "details" : "search",
+      requestedIntent,
+      queryUsed: titleMatches.length > 0 ? titleLookup.queryUsed : librarySearchLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches
+    };
+  }
+
+  if (requestedIntent === "episodes") {
+    const browseQuery = showCandidate?.title ?? titleLookup.queryUsed;
+    const browseMatches = browsePlexShowEpisodes(index, {
+      showTitle: browseQuery,
+      seasonIndex,
+      limit
+    });
+
+    if (browseMatches.length > 0) {
+      return {
+        resolvedIntent: "episodes",
+        requestedIntent,
+        queryUsed: browseQuery,
+        seasonIndex,
+        titleMatches,
+        episodeMatches: browseMatches,
+        searchMatches,
+        matchedShowTitle: showCandidate?.title ?? browseQuery
+      };
+    }
+
+    return {
+      resolvedIntent: episodeMatches.length > 0 ? "episode_search" : titleMatches.length > 0 ? "details" : "search",
+      requestedIntent,
+      queryUsed:
+        episodeMatches.length > 0
+          ? episodeSearchLookup.queryUsed
+          : titleMatches.length > 0
+            ? titleLookup.queryUsed
+            : librarySearchLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate?.title
+    };
+  }
+
+  if (requestedIntent === "episode_search") {
+    return {
+      resolvedIntent: episodeMatches.length > 0 ? "episode_search" : searchMatches.length > 0 ? "search" : "details",
+      requestedIntent,
+      queryUsed:
+        episodeMatches.length > 0
+          ? episodeSearchLookup.queryUsed
+          : searchMatches.length > 0
+            ? librarySearchLookup.queryUsed
+            : titleLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate?.title
+    };
+  }
+
+  if (requestedIntent === "details") {
+    return {
+      resolvedIntent: titleMatches.length > 0 ? "details" : searchMatches.length > 0 ? "search" : "episode_search",
+      requestedIntent,
+      queryUsed:
+        titleMatches.length > 0
+          ? titleLookup.queryUsed
+          : searchMatches.length > 0
+            ? librarySearchLookup.queryUsed
+            : episodeSearchLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate?.title
+    };
+  }
+
+  if (seasonIndex !== undefined && showCandidate) {
+    const seasonEpisodes = browsePlexShowEpisodes(index, {
+      showTitle: showCandidate.title,
+      seasonIndex,
+      limit
+    });
+
+    if (seasonEpisodes.length > 0) {
+      return {
+        resolvedIntent: "episodes",
+        requestedIntent,
+        queryUsed: showCandidate.title,
+        seasonIndex,
+        titleMatches,
+        episodeMatches: seasonEpisodes,
+        searchMatches,
+        matchedShowTitle: showCandidate.title
+      };
+    }
+  }
+
+  if (showCandidate && (isStrongTitleMatch(titleLookup.queryUsed, showCandidate) || options.mediaType === "tv")) {
+    return {
+      resolvedIntent: "summary",
+      requestedIntent,
+      queryUsed: titleLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate.title
+    };
+  }
+
+  if (titleMatches.length > 0) {
+    return {
+      resolvedIntent: "details",
+      requestedIntent,
+      queryUsed: titleLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate?.title
+    };
+  }
+
+  if (episodeMatches.length > 0) {
+    return {
+      resolvedIntent: "episode_search",
+      requestedIntent,
+      queryUsed: episodeSearchLookup.queryUsed,
+      seasonIndex,
+      titleMatches,
+      episodeMatches,
+      searchMatches,
+      matchedShowTitle: showCandidate?.title
+    };
+  }
+
+  return {
+    resolvedIntent: "search",
+    requestedIntent,
+    queryUsed: librarySearchLookup.queryUsed,
+    seasonIndex,
+    titleMatches,
+    episodeMatches,
+    searchMatches,
+    matchedShowTitle: showCandidate?.title
+  };
+}
+
+export function formatPlexFind(result: PlexFindResult, index: PlexLibraryIndex, options: PlexFindOptions) {
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    `Plex finder for "${options.query}":`,
+    `- Resolved intent: ${result.resolvedIntent.replace("_", " ")}`,
+    result.queryUsed !== options.query.trim() ? `- Search query used: ${result.queryUsed}` : "",
+    result.matchedShowTitle ? `- Matched show: ${result.matchedShowTitle}` : "",
+    result.seasonIndex !== undefined ? `- Season: ${result.seasonIndex}` : "",
+    ""
+  ].filter(Boolean);
+
+  if (result.resolvedIntent === "summary" && result.matchedShowTitle) {
+    appendSection(
+      lines,
+      "Best match",
+      formatPlexShowSummary(getPlexShowSummary(index, { showTitle: result.matchedShowTitle }), index, {
+        showTitle: result.matchedShowTitle
+      })
+    );
+
+    if (result.titleMatches.length > 1) {
+      appendSection(
+        lines,
+        "Other close title matches",
+        formatPlexItemDetails(result.titleMatches.slice(1), index, {
+          title: result.queryUsed,
+          section: options.section,
+          limit: Math.max(Math.min(options.limit ?? 5, 10) - 1, 1)
+        })
+      );
+    }
+  } else if (result.resolvedIntent === "episodes") {
+    appendSection(
+      lines,
+      "Episode browse",
+      formatPlexShowEpisodes(result.episodeMatches, index, {
+        showTitle: result.matchedShowTitle ?? result.queryUsed,
+        seasonIndex: result.seasonIndex,
+        limit: options.limit
+      })
+    );
+  } else if (result.resolvedIntent === "episode_search") {
+    appendSection(
+      lines,
+      "Episode matches",
+      formatPlexEpisodes(result.episodeMatches, index, {
+        query: result.queryUsed,
+        showTitle: result.matchedShowTitle,
+        limit: options.limit
+      })
+    );
+  } else if (result.resolvedIntent === "details") {
+    appendSection(
+      lines,
+      "Best title matches",
+      formatPlexItemDetails(result.titleMatches, index, {
+        title: result.queryUsed,
+        section: options.section,
+        limit: options.limit
+      })
+    );
+  } else {
+    appendSection(
+      lines,
+      "Library matches",
+      formatPlexSearchResults(result.searchMatches, index, {
+        query: result.queryUsed,
+        section: options.section,
+        limit: options.limit
+      })
+    );
+  }
+
+  lines.push("Tip: if you want a narrower result next time, set intent to details, summary, episodes, or episode_search.");
+  return lines.join("\n").trim();
 }
 
 export function browsePlexByGenre(index: PlexLibraryIndex, options: PlexGenreBrowseOptions) {

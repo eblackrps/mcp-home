@@ -27,9 +27,11 @@ import {
   browsePlexByDecade,
   browsePlexShowEpisodes,
   browsePlexChildren,
+  findPlex,
   findPlexEpisodes,
   findPlexSeriesGaps,
   formatPlexDecadeBrowse,
+  formatPlexFind,
   formatPlexGenreBrowse,
   formatPlexEpisodes,
   formatPlexChildren,
@@ -158,6 +160,12 @@ const DOCKER_COMMAND_CATALOG: CommandCatalogEntry[] = [
 ];
 
 const PLEX_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "find_plex",
+    summary: "Natural Plex finder for broad requests like Sopranos that can route to details, show summary, or episode results.",
+    options: ["query", "mediaType", "intent", "section", "seasonIndex", "limit"],
+    example: "find_plex query=Sopranos"
+  },
   {
     name: "get_plex_status",
     summary: "High-level Plex server and library summary.",
@@ -370,7 +378,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.11"
+    version: "0.2.12"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -423,6 +431,49 @@ export function createServer() {
       return withAudit("list_plex_commands", { query }, async () => ({
         content: [{ type: "text", text: formatCommandCatalog("Plex", PLEX_COMMAND_CATALOG, query) }]
       }));
+    }
+  );
+
+  server.tool(
+    "find_plex",
+    "Use this as the broad Plex entrypoint for natural requests like finding Sopranos. It can route to title details, show summaries, or episode results.",
+    {
+      query: z.string().min(1).describe("Natural Plex query, for example Sopranos, Sopranos season 2, or Pine Barrens"),
+      mediaType: z
+        .enum(["movie", "tv", "audio"])
+        .optional()
+        .describe("Optional media scope: movie for films, tv for shows, or audio for artists, albums, and tracks"),
+      intent: z
+        .enum(["auto", "details", "summary", "episodes", "episode_search"])
+        .optional()
+        .describe("Optional routing hint. Leave as auto for normal natural-language lookups."),
+      section: z.string().min(1).optional().describe("Optional Plex library section name filter"),
+      seasonIndex: z.number().int().min(1).optional().describe("Optional season number when you want episode browsing"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of results to return, from 1 to 25")
+    },
+    async ({ query, mediaType, intent, section, seasonIndex, limit }) => {
+      return withAudit("find_plex", { query, mediaType, intent, section, seasonIndex, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const result = findPlex(index, { query, mediaType, intent, section, seasonIndex, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexFind(result, index, { query, mediaType, intent, section, seasonIndex, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_plex returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to run Plex finder: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
     }
   );
 

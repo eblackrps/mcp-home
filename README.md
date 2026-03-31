@@ -11,6 +11,7 @@ The initial toolset is intentionally conservative:
 - `get_time`
 - `list_docker_commands`
 - `list_plex_commands`
+- `find_plex`
 - `get_homelab_status`
 - `get_host_status`
 - `get_docker_status`
@@ -52,6 +53,8 @@ The initial toolset is intentionally conservative:
 - `list_notes`
 - `search_notes`
 - `read_note`
+
+For natural Plex requests, start with `find_plex`. It is the easiest way to ask for things like `Sopranos`, `Sopranos season 2`, or `Pine Barrens` without remembering the exact specialized tool name first.
 
 ## Why this shape
 
@@ -160,6 +163,7 @@ Once you have refreshed the host data, these tools become useful:
 - `list_docker_volumes`
 - `get_docker_cleanup_candidates`
 - `list_plex_commands`
+- `find_plex`
 - `get_plex_status`
 - `get_plex_server_activity`
 - `get_plex_now_playing`
