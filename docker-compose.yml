@@ -1,0 +1,32 @@
+services:
+  mcp-home:
+    build: .
+    container_name: mcp-home
+    restart: unless-stopped
+    env_file:
+      - .env
+    volumes:
+      - ./notes:/app/notes:ro
+    expose:
+      - "8787"
+
+  caddy:
+    image: caddy:2
+    container_name: mcp-home-caddy
+    restart: unless-stopped
+    depends_on:
+      - mcp-home
+    environment:
+      MCP_DOMAIN: ${MCP_DOMAIN}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
+

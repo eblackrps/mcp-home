@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.env
+.DS_Store
+caddy_data/
+caddy_config/
+npm-debug.log*
+

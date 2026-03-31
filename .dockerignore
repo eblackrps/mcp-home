@@ -1,0 +1,9 @@
+node_modules/
+dist/
+.git/
+.env
+smoke-http.out.log
+smoke-http.err.log
+caddy_data/
+caddy_config/
+
