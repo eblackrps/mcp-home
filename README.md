@@ -13,6 +13,11 @@ The initial toolset is intentionally conservative:
 - `get_host_status`
 - `get_docker_status`
 - `list_docker_containers`
+- `get_docker_projects`
+- `get_docker_issues`
+- `get_docker_container_details`
+- `list_docker_images`
+- `list_docker_networks`
 - `get_plex_status`
 - `get_plex_server_activity`
 - `get_plex_now_playing`
@@ -118,7 +123,7 @@ npm run refresh:host
 That script:
 
 - reads Windows uptime plus Docker Desktop, Corsair iCUE, and Plex process or service state
-- captures a read-only Docker container snapshot from `docker ps -a`
+- captures a read-only Docker snapshot from `docker ps -a`, `docker inspect`, `docker image ls`, and `docker network ls`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
 - captures a Plex activity snapshot from local sessions, watch history, continue-watching hubs, on-deck hubs, and unwatched library sections when a local token is available
@@ -134,6 +139,11 @@ Once you have refreshed the host data, these tools become useful:
 - `get_host_status`
 - `get_docker_status`
 - `list_docker_containers`
+- `get_docker_projects`
+- `get_docker_issues`
+- `get_docker_container_details`
+- `list_docker_images`
+- `list_docker_networks`
 - `get_plex_status`
 - `get_plex_server_activity`
 - `get_plex_now_playing`

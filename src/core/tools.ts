@@ -4,7 +4,12 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import {
+  formatDockerContainerDetails,
   formatDockerContainers,
+  formatDockerImages,
+  formatDockerIssues,
+  formatDockerNetworks,
+  formatDockerProjects,
   formatDockerStatus,
   formatPlexStatus,
   formatWindowsHostStatus,
@@ -97,7 +102,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.7"
+    version: "0.2.8"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -232,6 +237,160 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to list Docker containers: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_projects",
+    "Use this to summarize Docker Compose projects and their container states from the local Windows host snapshot.",
+    {
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of projects to return, from 1 to 50")
+    },
+    async ({ project, limit }) => {
+      return withAudit("get_docker_projects", { project, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerProjects(status, { project, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_projects returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Docker projects: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_issues",
+    "Use this to list unhealthy, restarting, dead, or non-zero exited Docker containers from the local Windows host snapshot.",
+    {
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of problem containers to return, from 1 to 50")
+    },
+    async ({ limit }) => {
+      return withAudit("get_docker_issues", { limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerIssues(status, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_issues returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Docker issues: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_container_details",
+    "Use this to inspect a specific Docker container from the local Windows host snapshot.",
+    {
+      name: z.string().min(1).describe("Container name, ID, or image substring to inspect")
+    },
+    async ({ name }) => {
+      return withAudit("get_docker_container_details", { name }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerContainerDetails(status, name) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_container_details returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker container details: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_docker_images",
+    "Use this to list Docker images from the local Windows host snapshot, with optional repository and dangling filters.",
+    {
+      repository: z.string().min(1).optional().describe("Optional repository substring filter"),
+      dangling: z.boolean().optional().describe("Optional dangling image filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of images to return, from 1 to 50")
+    },
+    async ({ repository, dangling, limit }) => {
+      return withAudit("list_docker_images", { repository, dangling, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerImages(status, { repository, dangling, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_docker_images returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Docker images: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_docker_networks",
+    "Use this to list Docker networks from the local Windows host snapshot, with an optional name filter.",
+    {
+      name: z.string().min(1).optional().describe("Optional Docker network name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of networks to return, from 1 to 50")
+    },
+    async ({ name, limit }) => {
+      return withAudit("list_docker_networks", { name, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerNetworks(status, { name, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_docker_networks returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Docker networks: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

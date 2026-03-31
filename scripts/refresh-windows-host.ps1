@@ -96,6 +96,85 @@ function Get-DockerLabelValue {
   return $null
 }
 
+function Convert-DockerDateValue {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value) -or $Value -eq "0001-01-01T00:00:00Z") {
+    return $null
+  }
+
+  try {
+    return ([DateTimeOffset]::Parse($Value)).ToLocalTime().ToString("o")
+  } catch {
+    return $Value
+  }
+}
+
+function Get-DockerInspectIndex {
+  param(
+    [System.Management.Automation.CommandInfo]$DockerCommand,
+    [object[]]$Containers
+  )
+
+  $index = @{}
+  if ($null -eq $DockerCommand -or -not $Containers -or $Containers.Count -eq 0) {
+    return $index
+  }
+
+  $ids = @($Containers | ForEach-Object { $_.id } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Select-Object -Unique)
+  if ($ids.Count -eq 0) {
+    return $index
+  }
+
+  $rawInspect = & $DockerCommand.Source inspect $ids 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawInspect) {
+    return $index
+  }
+
+  $parsed = (($rawInspect | Out-String) | ConvertFrom-Json)
+  foreach ($record in @($parsed)) {
+    $mounts = @()
+    foreach ($mount in @($record.Mounts)) {
+      $mounts += [ordered]@{
+        type = [string]$mount.Type
+        source = if ($mount.Source) { [string]$mount.Source } else { $null }
+        destination = [string]$mount.Destination
+        mode = if ($mount.Mode) { [string]$mount.Mode } else { $null }
+        readWrite = if ($null -ne $mount.RW) { [bool]$mount.RW } else { $null }
+      }
+    }
+
+    $commandParts = @()
+    if ($record.Path) {
+      $commandParts += [string]$record.Path
+    }
+    foreach ($arg in @($record.Args)) {
+      if (-not [string]::IsNullOrWhiteSpace([string]$arg)) {
+        $commandParts += [string]$arg
+      }
+    }
+
+    $detail = [ordered]@{
+      command = if ($commandParts.Count -gt 0) { $commandParts -join " " } else { $null }
+      health = if ($record.State.Health -and $record.State.Health.Status) { [string]$record.State.Health.Status } else { $null }
+      exitCode = if ($null -ne $record.State.ExitCode) { [int]$record.State.ExitCode } else { $null }
+      error = if ($record.State.Error) { [string]$record.State.Error } else { $null }
+      restartCount = if ($null -ne $record.RestartCount) { [int]$record.RestartCount } else { $null }
+      startedAt = Convert-DockerDateValue -Value ([string]$record.State.StartedAt)
+      finishedAt = Convert-DockerDateValue -Value ([string]$record.State.FinishedAt)
+      mounts = $mounts
+    }
+
+    $name = if ($record.Name) { ([string]$record.Name).TrimStart("/") } else { $null }
+    $keys = @([string]$record.Id, $name) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($key in $keys) {
+      $index[$key] = $detail
+    }
+  }
+
+  return $index
+}
+
 function Get-DockerContainers {
   param([System.Management.Automation.CommandInfo]$DockerCommand)
 
@@ -131,16 +210,104 @@ function Get-DockerContainers {
       image = [string]$record.Image
       state = [string]$record.State
       status = [string]$record.Status
+      command = if ($record.Command) { [string]$record.Command } else { $null }
       ports = if ($record.Ports) { [string]$record.Ports } else { $null }
       runningFor = if ($record.RunningFor) { [string]$record.RunningFor } else { $null }
       createdAt = if ($record.CreatedAt) { [string]$record.CreatedAt } else { $null }
+      startedAt = $null
+      finishedAt = $null
+      health = $null
+      exitCode = $null
+      error = $null
+      restartCount = $null
       networks = $networks
       composeProject = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.project"
       composeService = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.service"
+      mounts = @()
+      size = if ($record.Size) { [string]$record.Size } else { $null }
     }
   }
 
   return $containers
+}
+
+function Get-DockerImages {
+  param([System.Management.Automation.CommandInfo]$DockerCommand)
+
+  $images = @()
+  if ($null -eq $DockerCommand) {
+    return $images
+  }
+
+  $rawImages = & $DockerCommand.Source image ls --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawImages) {
+    return $images
+  }
+
+  foreach ($line in @($rawImages)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $containerCount = $null
+    if ($record.Containers -and $record.Containers -ne "N/A") {
+      $parsedContainers = 0
+      if ([int]::TryParse([string]$record.Containers, [ref]$parsedContainers)) {
+        $containerCount = $parsedContainers
+      }
+    }
+
+    $repository = [string]$record.Repository
+    $tag = [string]$record.Tag
+    $images += [ordered]@{
+      id = [string]$record.ID
+      repository = $repository
+      tag = $tag
+      size = if ($record.Size) { [string]$record.Size } else { $null }
+      containers = $containerCount
+      createdAt = if ($record.CreatedAt) { [string]$record.CreatedAt } else { $null }
+      createdSince = if ($record.CreatedSince) { [string]$record.CreatedSince } else { $null }
+      dangling = ($repository -eq "<none>" -or $tag -eq "<none>")
+    }
+  }
+
+  return $images
+}
+
+function Get-DockerNetworks {
+  param([System.Management.Automation.CommandInfo]$DockerCommand)
+
+  $networks = @()
+  if ($null -eq $DockerCommand) {
+    return $networks
+  }
+
+  $rawNetworks = & $DockerCommand.Source network ls --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawNetworks) {
+    return $networks
+  }
+
+  foreach ($line in @($rawNetworks)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $labels = if ($record.Labels) { [string]$record.Labels } else { "" }
+    $networks += [ordered]@{
+      id = [string]$record.ID
+      name = [string]$record.Name
+      driver = [string]$record.Driver
+      scope = [string]$record.Scope
+      internal = if ($null -ne $record.Internal) { [System.Convert]::ToBoolean($record.Internal) } else { $null }
+      ipv6 = if ($null -ne $record.IPv6) { [System.Convert]::ToBoolean($record.IPv6) } else { $null }
+      composeProject = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.project"
+      createdAt = if ($record.CreatedAt) { [string]$record.CreatedAt } else { $null }
+    }
+  }
+
+  return $networks
 }
 
 function Convert-PlexDateValue {
@@ -405,6 +572,8 @@ $dockerServices = Convert-ServiceState -Names @("com.docker.service")
 $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
 $dockerCliVersion = $null
 $dockerContainers = @()
+$dockerImages = @()
+$dockerNetworks = @()
 
 if ($dockerCommand) {
   $dockerVersionOutput = & $dockerCommand.Source version --format '{{.Client.Version}}' 2>$null
@@ -413,17 +582,51 @@ if ($dockerCommand) {
   }
 
   $dockerContainers = @(Get-DockerContainers -DockerCommand $dockerCommand)
+  $dockerInspectIndex = Get-DockerInspectIndex -DockerCommand $dockerCommand -Containers $dockerContainers
+  foreach ($container in $dockerContainers) {
+    $detail = $dockerInspectIndex[$container.id]
+    if (-not $detail) {
+      $detail = $dockerInspectIndex[$container.name]
+    }
+
+    if ($detail) {
+      $container["command"] = $detail.command
+      $container["health"] = $detail.health
+      $container["exitCode"] = $detail.exitCode
+      $container["error"] = $detail.error
+      $container["restartCount"] = $detail.restartCount
+      $container["startedAt"] = $detail.startedAt
+      $container["finishedAt"] = $detail.finishedAt
+      $container["mounts"] = $detail.mounts
+    }
+  }
+  $dockerImages = @(Get-DockerImages -DockerCommand $dockerCommand)
+  $dockerNetworks = @(Get-DockerNetworks -DockerCommand $dockerCommand)
 }
 
 $dockerRunningCount = @($dockerContainers | Where-Object { $_.state -eq "running" }).Count
 $dockerExitedCount = @($dockerContainers | Where-Object { $_.state -eq "exited" }).Count
-$dockerUnhealthyCount = @($dockerContainers | Where-Object { $_.status -match "unhealthy" }).Count
+$dockerUnhealthyCount = @($dockerContainers | Where-Object { $_.health -eq "unhealthy" -or $_.status -match "unhealthy" }).Count
 $dockerProblemCount = @(
-  $dockerContainers | Where-Object { $_.status -match "unhealthy" -or $_.state -in @("restarting", "dead") }
+  $dockerContainers |
+    Where-Object {
+      $_.health -eq "unhealthy" -or
+      $_.status -match "unhealthy" -or
+      $_.state -in @("restarting", "dead") -or
+      ($_.state -eq "exited" -and $null -ne $_.exitCode -and $_.exitCode -ne 0)
+    }
+).Count
+$dockerImageCount = @($dockerImages).Count
+$dockerNetworkCount = @($dockerNetworks).Count
+$dockerComposeProjectCount = @(
+  $dockerContainers |
+    ForEach-Object { $_["composeProject"] } |
+    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+    Select-Object -Unique
 ).Count
 $dockerRunning = $dockerProcesses.Count -gt 0
 $dockerStatus = if ($dockerRunning -and $dockerProblemCount -eq 0) { "healthy" } elseif ($dockerRunning -or $dockerServices.Count -gt 0) { "degraded" } else { "offline" }
-$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy."
+$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy, $dockerProblemCount problems. Images: $dockerImageCount. Networks: $dockerNetworkCount. Compose projects: $dockerComposeProjectCount."
 $dockerComponent = New-Component -Name "docker" -Status $dockerStatus -Details $dockerDetails
 
 $corsairProcesses = Get-ProcessNames -Names @(
@@ -544,7 +747,13 @@ $payload = [ordered]@{
     runningCount = $dockerRunningCount
     exitedCount = $dockerExitedCount
     unhealthyCount = $dockerUnhealthyCount
+    problemCount = $dockerProblemCount
+    imageCount = $dockerImageCount
+    networkCount = $dockerNetworkCount
+    composeProjectCount = $dockerComposeProjectCount
     containers = $dockerContainers
+    images = $dockerImages
+    networks = $dockerNetworks
   }
   plex = [ordered]@{
     reachable = $plexReachable
