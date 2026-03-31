@@ -47,6 +47,26 @@ type PlexTitleSearchOptions = {
   limit?: number;
 };
 
+type PlexItemDetailsOptions = {
+  title: string;
+  itemType?: string;
+  section?: string;
+  limit?: number;
+};
+
+type PlexBrowseChildrenOptions = {
+  parentTitle: string;
+  parentType: "show" | "artist" | "album";
+  section?: string;
+  limit?: number;
+};
+
+type PlexDuplicateOptions = {
+  itemType?: string;
+  section?: string;
+  limit?: number;
+};
+
 const DEFAULT_PLEX_LIBRARY_INDEX_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/plex-library-index.json", import.meta.url))
 );
@@ -119,8 +139,15 @@ function assertPlexLibraryIndex(value: unknown): asserts value is PlexLibraryInd
   }
 }
 
-function normalize(value: string | undefined) {
+function normalize(value: string | null | undefined) {
   return value?.trim().toLowerCase();
+}
+
+function normalizeTitleKey(value: string | undefined) {
+  return value
+    ?.toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function buildSearchHaystack(item: PlexLibraryItem) {
@@ -160,6 +187,21 @@ function scoreItem(item: PlexLibraryItem, query: string) {
 function formatContext(item: PlexLibraryItem) {
   const context = [item.grandparentTitle, item.parentTitle].filter((value): value is string => Boolean(value));
   return context.length > 0 ? context.join(" > ") : "";
+}
+
+function uniqueStrings(values: Array<string | null | undefined>) {
+  return [...new Set(values.filter((value): value is string => Boolean(value && value.trim())))]
+}
+
+function sortByRelevance(left: PlexLibraryItem, right: PlexLibraryItem, query: string) {
+  const leftScore = scoreItem(left, query);
+  const rightScore = scoreItem(right, query);
+
+  if (rightScore !== leftScore) {
+    return rightScore - leftScore;
+  }
+
+  return left.title.localeCompare(right.title);
 }
 
 function matchesTitleMediaType(item: PlexLibraryItem, mediaType: PlexTitleSearchOptions["mediaType"]) {
@@ -318,6 +360,216 @@ export function formatPlexTitleSearchResults(
     const context = formatContext(item);
     if (context) {
       lines.push(`  Context: ${context}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getPlexItemDetails(index: PlexLibraryIndex, options: PlexItemDetailsOptions) {
+  const title = normalize(options.title);
+  const itemType = normalize(options.itemType);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 5, 1), 10);
+
+  if (!title) {
+    return [];
+  }
+
+  const filtered = index.items.filter((item) => {
+    if (itemType && item.itemType.toLowerCase() !== itemType) {
+      return false;
+    }
+
+    if (section && !item.section.toLowerCase().includes(section)) {
+      return false;
+    }
+
+    return item.title.toLowerCase().includes(title);
+  });
+
+  const exactMatches = filtered.filter((item) => normalizeTitleKey(item.title) === normalizeTitleKey(options.title));
+  const source = exactMatches.length > 0 ? exactMatches : filtered;
+
+  return source.sort((left, right) => sortByRelevance(left, right, title)).slice(0, limit);
+}
+
+export function formatPlexItemDetails(
+  results: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexItemDetailsOptions
+) {
+  if (results.length === 0) {
+    return `No Plex items matched "${options.title}".`;
+  }
+
+  const exact = results.some((item) => normalizeTitleKey(item.title) === normalizeTitleKey(options.title));
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    exact ? `Matches for "${options.title}":` : `Closest Plex matches for "${options.title}":`,
+    ""
+  ];
+
+  for (const item of results) {
+    const year = item.year ? ` | ${item.year}` : "";
+    const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
+    lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
+
+    const context = formatContext(item);
+    if (context) {
+      lines.push(`  Context: ${context}`);
+    }
+
+    if (item.summarySnippet) {
+      lines.push(`  ${item.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function browsePlexChildren(index: PlexLibraryIndex, options: PlexBrowseChildrenOptions) {
+  const parentTitle = normalize(options.parentTitle);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 50);
+
+  if (!parentTitle) {
+    return [];
+  }
+
+  const candidates = index.items.filter((item) => {
+    if (section && !item.section.toLowerCase().includes(section)) {
+      return false;
+    }
+
+    if (options.parentType === "show") {
+      return item.itemType === "episode" && normalize(item.grandparentTitle)?.includes(parentTitle);
+    }
+
+    if (options.parentType === "artist") {
+      return item.itemType === "album" && normalize(item.parentTitle)?.includes(parentTitle);
+    }
+
+    return item.itemType === "track" && normalize(item.parentTitle)?.includes(parentTitle);
+  });
+
+  return candidates
+    .sort((left, right) => {
+      const leftKey = options.parentType === "show" ? `${left.year ?? 0}:${left.title}` : left.title;
+      const rightKey = options.parentType === "show" ? `${right.year ?? 0}:${right.title}` : right.title;
+      return leftKey.localeCompare(rightKey);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexChildren(
+  results: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexBrowseChildrenOptions
+) {
+  if (results.length === 0) {
+    return `No Plex children matched ${options.parentType} "${options.parentTitle}".`;
+  }
+
+  const childLabel =
+    options.parentType === "show" ? "episodes" : options.parentType === "artist" ? "albums" : "tracks";
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    `Browsing ${childLabel} for ${options.parentType} "${options.parentTitle}":`,
+    ""
+  ];
+
+  for (const item of results) {
+    const year = item.year ? ` | ${item.year}` : "";
+    const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
+    lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
+
+    const context = formatContext(item);
+    if (context) {
+      lines.push(`  Context: ${context}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function listPlexDuplicates(index: PlexLibraryIndex, options: PlexDuplicateOptions) {
+  const itemType = normalize(options.itemType);
+  const section = normalize(options.section);
+  const limit = Math.min(Math.max(options.limit ?? 15, 1), 50);
+
+  const groups = new Map<string, PlexLibraryItem[]>();
+
+  for (const item of index.items) {
+    if (itemType && item.itemType.toLowerCase() !== itemType) {
+      continue;
+    }
+
+    if (section && !item.section.toLowerCase().includes(section)) {
+      continue;
+    }
+
+    const key = [normalizeTitleKey(item.title), item.itemType.toLowerCase(), item.section.toLowerCase()].join("|");
+    const existing = groups.get(key);
+    if (existing) {
+      existing.push(item);
+    } else {
+      groups.set(key, [item]);
+    }
+  }
+
+  return [...groups.values()]
+    .filter((group) => group.length > 1)
+    .sort((left, right) => {
+      if (right.length !== left.length) {
+        return right.length - left.length;
+      }
+
+      return left[0].title.localeCompare(right[0].title);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexDuplicates(
+  groups: PlexLibraryItem[][],
+  index: PlexLibraryIndex,
+  options: PlexDuplicateOptions
+) {
+  const filters = [options.section ? `section=${options.section}` : "", options.itemType ? `type=${options.itemType}` : ""]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    filters ? `Duplicate Plex items (${filters}):` : "Duplicate Plex items:",
+    ""
+  ];
+
+  if (groups.length === 0) {
+    lines.push("- No duplicate titles matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const group of groups) {
+    const first = group[0];
+    lines.push(`- ${first.title} | ${first.itemType} | ${first.section} | ${group.length} copies`);
+
+    const contexts = uniqueStrings(group.map((item) => {
+      const context = formatContext(item);
+      return context || undefined;
+    }));
+    if (contexts.length > 0) {
+      lines.push(`  Contexts: ${contexts.slice(0, 3).join("; ")}`);
+    }
+
+    const years = uniqueStrings(group.map((item) => (item.year ? String(item.year) : undefined)));
+    if (years.length > 0) {
+      lines.push(`  Years: ${years.join(", ")}`);
+    }
+
+    const addedDates = uniqueStrings(group.map((item) => item.addedAt ?? undefined));
+    if (addedDates.length > 0) {
+      lines.push(`  Added: ${addedDates.slice(0, 3).join("; ")}`);
     }
   }
 

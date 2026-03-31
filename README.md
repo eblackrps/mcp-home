@@ -14,9 +14,12 @@ The initial toolset is intentionally conservative:
 - `get_docker_status`
 - `list_docker_containers`
 - `get_plex_status`
+- `get_plex_item_details`
 - `list_plex_sections`
+- `browse_plex_children`
 - `search_plex_library`
 - `search_plex_titles`
+- `list_plex_duplicates`
 - `get_recent_plex_additions`
 - `list_notes`
 - `search_notes`
@@ -115,9 +118,12 @@ Once you have refreshed the host data, these tools become useful:
 - `get_docker_status`
 - `list_docker_containers`
 - `get_plex_status`
+- `get_plex_item_details`
 - `list_plex_sections`
+- `browse_plex_children`
 - `search_plex_library`
 - `search_plex_titles`
+- `list_plex_duplicates`
 - `get_recent_plex_additions`
 
 ## Automating the Windows refresh

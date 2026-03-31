@@ -12,11 +12,17 @@ import {
 } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
+  browsePlexChildren,
+  formatPlexChildren,
+  formatPlexDuplicates,
+  formatPlexItemDetails,
   formatPlexSearchResults,
   formatPlexTitleSearchResults,
   formatPlexSections,
   formatRecentPlexAdditions,
+  getPlexItemDetails,
   getRecentPlexAdditions,
+  listPlexDuplicates,
   readPlexLibraryIndex,
   searchPlexLibrary,
   searchPlexTitles
@@ -63,7 +69,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.2"
+    version: "0.2.3"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -236,6 +242,44 @@ export function createServer() {
   );
 
   server.tool(
+    "get_plex_item_details",
+    "Use this to get detailed Plex matches for a specific movie, show, album, artist, track, or episode title.",
+    {
+      title: z.string().min(1).describe("The item title to look up in Plex"),
+      itemType: z
+        .enum(["movie", "show", "episode", "artist", "album", "track"])
+        .optional()
+        .describe("Optional Plex item type filter"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(10).optional().describe("Maximum number of matching items to return, from 1 to 10")
+    },
+    async ({ title, itemType, section, limit }) => {
+      return withAudit("get_plex_item_details", { title, itemType, section, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = getPlexItemDetails(index, { title, itemType, section, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexItemDetails(results, index, { title, itemType, section, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_item_details returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex item details: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "list_plex_sections",
     "Use this to list the available Plex library sections from the local exported index.",
     {},
@@ -254,6 +298,45 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to list Plex sections: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "browse_plex_children",
+    "Use this to browse episodes for a show, albums for an artist, or tracks for an album from the local Plex index.",
+    {
+      parentTitle: z.string().min(1).describe("The show, artist, or album title whose children you want to browse"),
+      parentType: z
+        .enum(["show", "artist", "album"])
+        .describe("Choose show for episodes, artist for albums, or album for tracks"),
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of child items to return, from 1 to 50")
+    },
+    async ({ parentTitle, parentType, section, limit }) => {
+      return withAudit("browse_plex_children", { parentTitle, parentType, section, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = browsePlexChildren(index, { parentTitle, parentType, section, limit });
+
+          return {
+            content: [
+              { type: "text", text: formatPlexChildren(results, index, { parentTitle, parentType, section, limit }) }
+            ]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool browse_plex_children returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to browse Plex children: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -328,6 +411,43 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to search Plex titles: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_plex_duplicates",
+    "Use this to find duplicate Plex titles grouped by title, type, and section.",
+    {
+      section: z.string().min(1).optional().describe("Optional Plex section name filter"),
+      itemType: z
+        .enum(["movie", "show", "episode", "artist", "album", "track"])
+        .optional()
+        .describe("Optional Plex item type filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of duplicate groups to return, from 1 to 50")
+    },
+    async ({ section, itemType, limit }) => {
+      return withAudit("list_plex_duplicates", { section, itemType, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const groups = listPlexDuplicates(index, { section, itemType, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexDuplicates(groups, index, { section, itemType, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_plex_duplicates returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Plex duplicates: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
