@@ -1,0 +1,17 @@
+:80 {
+    encode gzip zstd
+
+    @health path /health
+    handle @health {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle /mcp* {
+        reverse_proxy mcp-home:8787
+    }
+
+    handle {
+        respond "not found" 404
+    }
+}
+

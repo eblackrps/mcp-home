@@ -86,6 +86,60 @@ npm run test:openai:mcp
 npm run test:anthropic:mcp
 ```
 
+## Recommended remote path: Caddy + Tailscale Funnel
+
+This is the cleanest home setup if you do not want to open router ports.
+
+1. Install and sign in to Tailscale on the Windows host.
+2. Make sure Funnel is enabled for your tailnet in the Tailscale admin console.
+3. Start the local reverse-proxy stack:
+
+   ```powershell
+   docker compose -f docker-compose.tailscale.yml up --build -d
+   ```
+
+4. Verify the local proxy before publishing it:
+
+   ```powershell
+   Invoke-RestMethod http://127.0.0.1:8788/health
+   ```
+
+5. Optional private dry run inside your tailnet:
+
+   ```powershell
+   tailscale serve --bg http://127.0.0.1:8788
+   tailscale serve status
+   ```
+
+   `serve` is tailnet-only. It is useful for a private check from another Tailscale device, but OpenAI and Anthropic still will not be able to reach it.
+
+6. Publish that local Caddy endpoint through Tailscale Funnel:
+
+   ```powershell
+   tailscale funnel --bg http://127.0.0.1:8788
+   ```
+
+7. Find the public `.ts.net` URL:
+
+   ```powershell
+   tailscale funnel status
+   ```
+
+8. Set `MCP_SERVER_URL` in `.env` to the published MCP endpoint, for example:
+
+   ```text
+   MCP_SERVER_URL=https://your-machine.your-tailnet.ts.net/mcp
+   ```
+
+9. Run the model-facing checks:
+
+   ```powershell
+   npm run test:openai:mcp
+   npm run test:anthropic:mcp
+   ```
+
+This stack keeps Caddy private on `127.0.0.1:8788`, and Tailscale provides the public HTTPS entrypoint. That means no router port-forwarding and no direct exposure of Docker ports to your LAN.
+
 ## Claude setup
 
 For local clients that can spawn stdio servers, point them at the built entrypoint:
@@ -194,7 +248,11 @@ Bring it up with:
 docker compose up --build -d
 ```
 
-For local development, `.env` uses repo-relative paths like `./notes` and `./data/homelab-status.json`. Docker Compose overrides those with container paths automatically. Set `MCP_DOMAIN` in `.env`, point DNS at your home endpoint or tunnel, and Caddy will terminate TLS for that hostname.
+For local development, `.env` uses repo-relative paths like `./notes` and `./data/homelab-status.json`. Docker Compose overrides those with container paths automatically.
+
+Use [docker-compose.yml](C:/MCP@home/docker-compose.yml) when you want Caddy to terminate TLS directly for your own domain.
+
+Use [docker-compose.tailscale.yml](C:/MCP@home/docker-compose.tailscale.yml) plus [Caddyfile.tailscale](C:/MCP@home/Caddyfile.tailscale) when you want Tailscale Funnel to provide the public HTTPS URL.
 
 ## Security notes
 
