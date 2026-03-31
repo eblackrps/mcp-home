@@ -153,6 +153,7 @@ function Get-DockerInspectIndex {
     foreach ($mount in @($record.Mounts)) {
       $mounts += [ordered]@{
         type = [string]$mount.Type
+        name = if ($mount.Name) { [string]$mount.Name } else { $null }
         source = if ($mount.Source) { [string]$mount.Source } else { $null }
         destination = [string]$mount.Destination
         mode = if ($mount.Mode) { [string]$mount.Mode } else { $null }
@@ -373,6 +374,124 @@ function Get-DockerNetworks {
   }
 
   return $networks
+}
+
+function Get-DockerVolumes {
+  param(
+    [System.Management.Automation.CommandInfo]$DockerCommand,
+    [object[]]$Containers
+  )
+
+  $volumes = @()
+  if ($null -eq $DockerCommand) {
+    return $volumes
+  }
+
+  $rawVolumes = & $DockerCommand.Source volume ls --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawVolumes) {
+    return $volumes
+  }
+
+  $attachedContainersByVolume = @{}
+  foreach ($container in @($Containers)) {
+    foreach ($mount in @($container.mounts)) {
+      if ($mount.type -ne "volume" -or [string]::IsNullOrWhiteSpace($mount.name)) {
+        continue
+      }
+
+      if (-not $attachedContainersByVolume.ContainsKey($mount.name)) {
+        $attachedContainersByVolume[$mount.name] = @()
+      }
+      $attachedContainersByVolume[$mount.name] += [string]$container.name
+    }
+  }
+
+  $volumeNames = @($rawVolumes | ForEach-Object { ($_ | ConvertFrom-Json).Name } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  $volumeInspectIndex = @{}
+  if ($volumeNames.Count -gt 0) {
+    $rawInspect = & $DockerCommand.Source volume inspect $volumeNames 2>$null
+    if ($LASTEXITCODE -eq 0 -and $rawInspect) {
+      $parsedInspect = (($rawInspect | Out-String) | ConvertFrom-Json)
+      foreach ($record in @($parsedInspect)) {
+        $volumeInspectIndex[[string]$record.Name] = $record
+      }
+    }
+  }
+
+  foreach ($line in @($rawVolumes)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $labels = if ($record.Labels) { [string]$record.Labels } else { "" }
+    $inspect = $volumeInspectIndex[[string]$record.Name]
+    $attachedContainers = @(
+      @($attachedContainersByVolume[[string]$record.Name]) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -Unique
+    )
+
+    $volumes += [ordered]@{
+      name = [string]$record.Name
+      driver = [string]$record.Driver
+      scope = [string]$record.Scope
+      mountpoint = if ($inspect -and $inspect.Mountpoint) { [string]$inspect.Mountpoint } elseif ($record.Mountpoint) { [string]$record.Mountpoint } else { $null }
+      createdAt = if ($inspect -and $inspect.CreatedAt) { Convert-DockerDateValue -Value ([string]$inspect.CreatedAt) } else { $null }
+      anonymous = ($labels -match "com.docker.volume.anonymous")
+      inUse = ($attachedContainers.Count -gt 0)
+      attachedContainers = $attachedContainers
+    }
+  }
+
+  return $volumes
+}
+
+function Get-DockerSystemStorage {
+  param([System.Management.Automation.CommandInfo]$DockerCommand)
+
+  $storage = @()
+  if ($null -eq $DockerCommand) {
+    return $storage
+  }
+
+  $rawStorage = & $DockerCommand.Source system df --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawStorage) {
+    return $storage
+  }
+
+  foreach ($line in @($rawStorage)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $totalCount = $null
+    if ($record.TotalCount) {
+      $parsedTotal = 0
+      if ([int]::TryParse([string]$record.TotalCount, [ref]$parsedTotal)) {
+        $totalCount = $parsedTotal
+      }
+    }
+
+    $active = $null
+    if ($record.Active -and $record.Active -ne "N/A") {
+      $parsedActive = 0
+      if ([int]::TryParse([string]$record.Active, [ref]$parsedActive)) {
+        $active = $parsedActive
+      }
+    }
+
+    $storage += [ordered]@{
+      type = [string]$record.Type
+      totalCount = $totalCount
+      active = $active
+      size = if ($record.Size) { [string]$record.Size } else { $null }
+      reclaimable = if ($record.Reclaimable) { [string]$record.Reclaimable } else { $null }
+    }
+  }
+
+  return $storage
 }
 
 function Convert-PlexDateValue {
@@ -639,6 +758,8 @@ $dockerCliVersion = $null
 $dockerContainers = @()
 $dockerImages = @()
 $dockerNetworks = @()
+$dockerVolumes = @()
+$dockerStorage = @()
 $dockerStatsIndex = @{}
 
 if ($dockerCommand) {
@@ -679,6 +800,8 @@ if ($dockerCommand) {
   }
   $dockerImages = @(Get-DockerImages -DockerCommand $dockerCommand)
   $dockerNetworks = @(Get-DockerNetworks -DockerCommand $dockerCommand)
+  $dockerVolumes = @(Get-DockerVolumes -DockerCommand $dockerCommand -Containers $dockerContainers)
+  $dockerStorage = @(Get-DockerSystemStorage -DockerCommand $dockerCommand)
 }
 
 $dockerRunningCount = @($dockerContainers | Where-Object { $_.state -eq "running" }).Count
@@ -695,6 +818,7 @@ $dockerProblemCount = @(
 ).Count
 $dockerImageCount = @($dockerImages).Count
 $dockerNetworkCount = @($dockerNetworks).Count
+$dockerVolumeCount = @($dockerVolumes).Count
 $dockerComposeProjectCount = @(
   $dockerContainers |
     ForEach-Object { $_["composeProject"] } |
@@ -703,7 +827,7 @@ $dockerComposeProjectCount = @(
 ).Count
 $dockerRunning = $dockerProcesses.Count -gt 0
 $dockerStatus = if ($dockerRunning -and $dockerProblemCount -eq 0) { "healthy" } elseif ($dockerRunning -or $dockerServices.Count -gt 0) { "degraded" } else { "offline" }
-$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy, $dockerProblemCount problems. Images: $dockerImageCount. Networks: $dockerNetworkCount. Compose projects: $dockerComposeProjectCount."
+$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy, $dockerProblemCount problems. Images: $dockerImageCount. Networks: $dockerNetworkCount. Volumes: $dockerVolumeCount. Compose projects: $dockerComposeProjectCount."
 $dockerComponent = New-Component -Name "docker" -Status $dockerStatus -Details $dockerDetails
 
 $corsairProcesses = Get-ProcessNames -Names @(
@@ -831,6 +955,8 @@ $payload = [ordered]@{
     containers = $dockerContainers
     images = $dockerImages
     networks = $dockerNetworks
+    volumes = $dockerVolumes
+    storage = $dockerStorage
   }
   plex = [ordered]@{
     reachable = $plexReachable

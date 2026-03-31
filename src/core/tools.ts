@@ -4,16 +4,19 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import {
+  formatDockerCleanupCandidates,
   formatDockerComposeHealth,
   formatDockerContainerDetails,
   formatDockerContainers,
   formatDockerImages,
   formatDockerIssues,
   formatDockerNetworks,
+  formatDockerProjectDetails,
   formatDockerProjects,
   formatDockerRecentActivity,
   formatDockerResourceUsage,
   formatDockerStatus,
+  formatDockerVolumes,
   formatPlexStatus,
   formatWindowsHostStatus,
   readWindowsHostStatus
@@ -105,7 +108,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.9"
+    version: "0.2.10"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -492,6 +495,100 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to summarize Docker Compose health: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_project_details",
+    "Use this to inspect a specific Docker Compose project from the local Windows host snapshot.",
+    {
+      project: z.string().min(1).describe("Compose project name to inspect")
+    },
+    async ({ project }) => {
+      return withAudit("get_docker_project_details", { project }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerProjectDetails(status, project) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_project_details returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker project details: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_docker_volumes",
+    "Use this to list Docker volumes from the local Windows host snapshot, with optional usage and anonymity filters.",
+    {
+      name: z.string().min(1).optional().describe("Optional Docker volume name filter"),
+      inUse: z.boolean().optional().describe("Optional filter for whether the volume is currently attached to a container"),
+      anonymous: z.boolean().optional().describe("Optional filter for anonymous Docker volumes"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of volumes to return, from 1 to 50")
+    },
+    async ({ name, inUse, anonymous, limit }) => {
+      return withAudit("list_docker_volumes", { name, inUse, anonymous, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerVolumes(status, { name, inUse, anonymous, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_docker_volumes returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Docker volumes: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_cleanup_candidates",
+    "Use this to summarize reclaimable Docker storage plus exited containers, unused images, and unused volumes from the local Windows host snapshot.",
+    {
+      olderThanHours: z.number().int().min(1).max(24 * 90).optional().describe("Only consider exited containers older than this many hours, from 1 to 2160"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of candidates per section to return, from 1 to 50")
+    },
+    async ({ olderThanHours, limit }) => {
+      return withAudit("get_docker_cleanup_candidates", { olderThanHours, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerCleanupCandidates(status, { olderThanHours, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_cleanup_candidates returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Docker cleanup candidates: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
