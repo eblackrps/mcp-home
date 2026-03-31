@@ -80,7 +80,7 @@ node dist/index-stdio.js
 For Claude Code specifically, the current Anthropic CLI flow is:
 
 ```bash
-claude mcp add mcp-home -- node /absolute/path/to/dist/index-stdio.js
+claude mcp add --transport stdio mcp-home -- node /absolute/path/to/dist/index-stdio.js
 ```
 
 On native Windows, Anthropic currently recommends wrapping `npx` commands with `cmd /c`, but a direct `node` command works fine for this project because the entrypoint is already a local script.
@@ -114,7 +114,7 @@ console.log(response.output_text);
 
 ## Anthropic Messages API example
 
-As of March 31, 2026, Anthropic's MCP connector docs still describe this feature as beta and require the `anthropic-beta: mcp-client-2025-04-04` header.
+As of March 31, 2026, Anthropic's MCP connector docs require the `anthropic-beta: mcp-client-2025-11-20` header. The current request shape keeps connection details in `mcp_servers` and enables tool exposure through an `mcp_toolset` entry in `tools`.
 
 ```ts
 const resp = await fetch("https://api.anthropic.com/v1/messages", {
@@ -123,10 +123,10 @@ const resp = await fetch("https://api.anthropic.com/v1/messages", {
     "content-type": "application/json",
     "x-api-key": process.env.ANTHROPIC_API_KEY!,
     "anthropic-version": "2023-06-01",
-    "anthropic-beta": "mcp-client-2025-04-04"
+    "anthropic-beta": "mcp-client-2025-11-20"
   },
   body: JSON.stringify({
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4-6",
     max_tokens: 800,
     messages: [
       { role: "user", content: "List my notes and read the homelab one." }
@@ -136,10 +136,23 @@ const resp = await fetch("https://api.anthropic.com/v1/messages", {
         type: "url",
         url: "https://your-domain.example.com/mcp",
         name: "home",
-        authorization_token: process.env.MCP_AUTH_TOKEN,
-        tool_configuration: {
-          enabled: true,
-          allowed_tools: ["list_notes", "read_note"]
+        authorization_token: process.env.MCP_AUTH_TOKEN
+      }
+    ],
+    tools: [
+      {
+        type: "mcp_toolset",
+        mcp_server_name: "home",
+        default_config: {
+          enabled: false
+        },
+        configs: {
+          list_notes: {
+            enabled: true
+          },
+          read_note: {
+            enabled: true
+          }
         }
       }
     ]
