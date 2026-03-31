@@ -23,6 +23,7 @@ export async function startHttp() {
   const authMode = (process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer") as "bearer" | "oauth" | "none";
   const passThroughAuth: express.RequestHandler = (_req, _res, next) => next();
 
+  app.set("trust proxy", 1);
   app.use(express.json({ limit: "1mb", type: ["application/json", "application/*+json"] }));
   app.use(express.urlencoded({ extended: false }));
 

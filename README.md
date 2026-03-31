@@ -35,6 +35,7 @@ mcp-home/
     local/
   notes/
   scripts/
+  state/
   src/
     core/
     transports/
@@ -157,9 +158,12 @@ Set these values in `.env`:
 MCP_AUTH_MODE=oauth
 MCP_SERVER_URL=https://your-public-hostname/mcp
 MCP_OAUTH_PASSWORD=your-shared-password
+MCP_OAUTH_STATE_PATH=./state/oauth-state.json
 ```
 
 If `MCP_OAUTH_PASSWORD` is left blank, the server falls back to `MCP_AUTH_TOKEN` as the login password.
+
+OAuth client registrations and tokens are now persisted to `state/` so ChatGPT reconnects keep working after container restarts or rebuilds.
 
 Then restart the stack and verify local auth metadata:
 

@@ -7,3 +7,4 @@ caddy_config/
 npm-debug.log*
 logs/
 data/local/*.json
+state/*.json
