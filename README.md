@@ -108,6 +108,30 @@ Once you have refreshed the host data, these tools become useful:
 - `get_plex_status`
 - `search_plex_library`
 
+## Automating the Windows refresh
+
+If you want the host and Plex snapshots to stay fresh without running the command manually, the repo now includes helper scripts for Windows Task Scheduler.
+
+Install a repeating task with the default 30-minute interval:
+
+```powershell
+npm run schedule:host-refresh
+```
+
+Remove it later:
+
+```powershell
+npm run unschedule:host-refresh
+```
+
+If you want a different interval, run the PowerShell script directly:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install-host-refresh-task.ps1 -IntervalMinutes 15
+```
+
+This creates a user-level scheduled task named `MCP Home Host Refresh` that runs `scripts/refresh-windows-host.ps1`.
+
 ## Model API checks
 
 OpenAI and Anthropic cannot reach `http://localhost:8787/mcp` directly. Before using either API, expose your MCP server on a public HTTPS URL with Caddy plus a tunnel or your own domain, then set `MCP_SERVER_URL` in `.env`.

@@ -8,6 +8,8 @@
     "dev:http": "tsx src/index-http.ts",
     "dev:stdio": "tsx src/index-stdio.ts",
     "refresh:host": "powershell -ExecutionPolicy Bypass -File scripts/refresh-windows-host.ps1",
+    "schedule:host-refresh": "powershell -ExecutionPolicy Bypass -File scripts/install-host-refresh-task.ps1",
+    "unschedule:host-refresh": "powershell -ExecutionPolicy Bypass -File scripts/remove-host-refresh-task.ps1",
     "test:anthropic:mcp": "tsx scripts/test-anthropic-mcp.ts",
     "test:openai:mcp": "tsx scripts/test-openai-mcp.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",
