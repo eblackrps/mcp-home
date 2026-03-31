@@ -110,6 +110,22 @@ function Convert-DockerDateValue {
   }
 }
 
+function Convert-DockerPercentValue {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $null
+  }
+
+  $trimmed = $Value.Trim().TrimEnd("%")
+  $parsed = 0.0
+  if ([double]::TryParse($trimmed, [ref]$parsed)) {
+    return $parsed
+  }
+
+  return $null
+}
+
 function Get-DockerInspectIndex {
   param(
     [System.Management.Automation.CommandInfo]$DockerCommand,
@@ -175,6 +191,54 @@ function Get-DockerInspectIndex {
   return $index
 }
 
+function Get-DockerStatsIndex {
+  param([System.Management.Automation.CommandInfo]$DockerCommand)
+
+  $index = @{}
+  if ($null -eq $DockerCommand) {
+    return $index
+  }
+
+  $rawStats = & $DockerCommand.Source stats --no-stream --format '{{json .}}' 2>$null
+  if ($LASTEXITCODE -ne 0 -or -not $rawStats) {
+    return $index
+  }
+
+  $sampledAt = Get-IsoNow
+  foreach ($line in @($rawStats)) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $record = $line | ConvertFrom-Json
+    $pids = $null
+    if ($record.PIDs) {
+      $parsedPids = 0
+      if ([int]::TryParse([string]$record.PIDs, [ref]$parsedPids)) {
+        $pids = $parsedPids
+      }
+    }
+
+    $detail = [ordered]@{
+      sampledAt = $sampledAt
+      cpuPercent = Convert-DockerPercentValue -Value ([string]$record.CPUPerc)
+      memoryUsage = if ($record.MemUsage) { [string]$record.MemUsage } else { $null }
+      memoryPercent = Convert-DockerPercentValue -Value ([string]$record.MemPerc)
+      netIO = if ($record.NetIO) { [string]$record.NetIO } else { $null }
+      blockIO = if ($record.BlockIO) { [string]$record.BlockIO } else { $null }
+      pids = $pids
+    }
+
+    $keys = @([string]$record.ID, [string]$record.Name, [string]$record.Container) |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    foreach ($key in $keys) {
+      $index[$key] = $detail
+    }
+  }
+
+  return $index
+}
+
 function Get-DockerContainers {
   param([System.Management.Automation.CommandInfo]$DockerCommand)
 
@@ -224,6 +288,7 @@ function Get-DockerContainers {
       composeProject = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.project"
       composeService = Get-DockerLabelValue -Labels $labels -Key "com.docker.compose.service"
       mounts = @()
+      resourceUsage = $null
       size = if ($record.Size) { [string]$record.Size } else { $null }
     }
   }
@@ -574,6 +639,7 @@ $dockerCliVersion = $null
 $dockerContainers = @()
 $dockerImages = @()
 $dockerNetworks = @()
+$dockerStatsIndex = @{}
 
 if ($dockerCommand) {
   $dockerVersionOutput = & $dockerCommand.Source version --format '{{.Client.Version}}' 2>$null
@@ -583,6 +649,7 @@ if ($dockerCommand) {
 
   $dockerContainers = @(Get-DockerContainers -DockerCommand $dockerCommand)
   $dockerInspectIndex = Get-DockerInspectIndex -DockerCommand $dockerCommand -Containers $dockerContainers
+  $dockerStatsIndex = Get-DockerStatsIndex -DockerCommand $dockerCommand
   foreach ($container in $dockerContainers) {
     $detail = $dockerInspectIndex[$container.id]
     if (-not $detail) {
@@ -598,6 +665,16 @@ if ($dockerCommand) {
       $container["startedAt"] = $detail.startedAt
       $container["finishedAt"] = $detail.finishedAt
       $container["mounts"] = $detail.mounts
+    }
+
+    $usage = $dockerStatsIndex[$container.id]
+    if (-not $usage) {
+      $usage = $dockerStatsIndex[$container.name]
+    }
+    if ($usage) {
+      $container["resourceUsage"] = $usage
+    } else {
+      $container["resourceUsage"] = $null
     }
   }
   $dockerImages = @(Get-DockerImages -DockerCommand $dockerCommand)

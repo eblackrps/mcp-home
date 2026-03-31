@@ -36,6 +36,7 @@ export type DockerContainerStatus = {
   composeProject?: string | null;
   composeService?: string | null;
   mounts?: DockerMountStatus[];
+  resourceUsage?: DockerContainerResourceUsage | null;
   size?: string | null;
 };
 
@@ -45,6 +46,16 @@ export type DockerMountStatus = {
   destination: string;
   mode?: string | null;
   readWrite?: boolean | null;
+};
+
+export type DockerContainerResourceUsage = {
+  sampledAt?: string | null;
+  cpuPercent?: number | null;
+  memoryUsage?: string | null;
+  memoryPercent?: number | null;
+  netIO?: string | null;
+  blockIO?: string | null;
+  pids?: number | null;
 };
 
 export type DockerImageStatus = {
@@ -207,6 +218,12 @@ function assertDockerContainerStatus(value: unknown): asserts value is DockerCon
       if (typeof item.type !== "string" || typeof item.destination !== "string") {
         throw new Error("Docker mount entries are missing required fields");
       }
+    }
+  }
+
+  if (candidate.resourceUsage !== undefined && candidate.resourceUsage !== null) {
+    if (!candidate.resourceUsage || typeof candidate.resourceUsage !== "object") {
+      throw new Error("Docker container resource usage must be an object when present");
     }
   }
 }
@@ -407,6 +424,33 @@ function getDockerComposeProjects(containers: DockerContainerStatus[]) {
   }
 
   return [...projects.values()].sort((left, right) => left.name.localeCompare(right.name));
+}
+
+function getDockerLatestActivityTimestamp(container: DockerContainerStatus) {
+  const candidates = [container.finishedAt, container.startedAt, container.createdAt]
+    .map((value) => (value ? Date.parse(value) : Number.NaN))
+    .filter((value) => Number.isFinite(value));
+
+  return candidates.length > 0 ? Math.max(...candidates) : Number.NaN;
+}
+
+function getDockerProjectHealth(projectContainers: DockerContainerStatus[]) {
+  const problemContainers = getDockerProblemContainers(projectContainers);
+  const runningCount = projectContainers.filter((container) => container.state === "running").length;
+
+  if (problemContainers.length > 0) {
+    return "degraded";
+  }
+
+  if (runningCount === projectContainers.length && runningCount > 0) {
+    return "healthy";
+  }
+
+  if (runningCount > 0) {
+    return "mixed";
+  }
+
+  return "inactive";
 }
 
 function formatDockerContainerLine(container: DockerContainerStatus) {
@@ -655,6 +699,55 @@ export function formatDockerProjects(
   return lines.join("\n");
 }
 
+export function formatDockerComposeHealth(
+  status: WindowsHostStatus,
+  options?: {
+    project?: string;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const projectFilter = normalize(options?.project);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+  const projects = getDockerComposeProjects(docker.containers)
+    .filter((project) => !projectFilter || project.name.toLowerCase().includes(projectFilter))
+    .slice(0, limit);
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    projectFilter ? `Docker Compose health (${options?.project}):` : "Docker Compose health:",
+    ""
+  ];
+
+  if (projects.length === 0) {
+    lines.push("- No compose projects matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const project of projects) {
+    const health = getDockerProjectHealth(project.containers);
+    const runningCount = project.containers.filter((container) => container.state === "running").length;
+    const problemContainers = getDockerProblemContainers(project.containers);
+    lines.push(
+      `- ${project.name} | ${health} | ${runningCount}/${project.containers.length} running | ${problemContainers.length} problems`
+    );
+
+    if (problemContainers.length === 0) {
+      lines.push("  No current problem containers in this project.");
+    } else {
+      for (const container of problemContainers.slice(0, 10)) {
+        lines.push(`  ${container.name} | ${container.status}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function formatDockerIssues(
   status: WindowsHostStatus,
   options?: {
@@ -691,6 +784,94 @@ export function formatDockerIssues(
       lines.push(
         `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
       );
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerResourceUsage(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    project?: string;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const project = normalize(options?.project);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+  const containers = docker.containers
+    .filter((container) => container.state === "running" && container.resourceUsage)
+    .filter((container) => {
+      if (name && !container.name.toLowerCase().includes(name) && !container.image.toLowerCase().includes(name)) {
+        return false;
+      }
+
+      if (project && (container.composeProject?.toLowerCase() || "") !== project) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort(
+      (left, right) =>
+        (right.resourceUsage?.memoryPercent ?? -1) - (left.resourceUsage?.memoryPercent ?? -1) ||
+        (right.resourceUsage?.cpuPercent ?? -1) - (left.resourceUsage?.cpuPercent ?? -1) ||
+        left.name.localeCompare(right.name)
+    )
+    .slice(0, limit);
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.project ? `project=${options.project}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Docker resource usage (${filters}):` : "Docker resource usage:",
+    ""
+  ];
+
+  if (containers.length === 0) {
+    lines.push("- No running containers with resource usage matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const container of containers) {
+    const usage = container.resourceUsage;
+    if (!usage) {
+      continue;
+    }
+
+    const usageBits = [
+      usage.cpuPercent !== undefined && usage.cpuPercent !== null ? `CPU ${usage.cpuPercent.toFixed(2)}%` : "",
+      usage.memoryUsage ? `Mem ${usage.memoryUsage}` : "",
+      usage.memoryPercent !== undefined && usage.memoryPercent !== null ? `Mem% ${usage.memoryPercent.toFixed(2)}%` : "",
+      usage.netIO ? `Net ${usage.netIO}` : "",
+      usage.blockIO ? `Block ${usage.blockIO}` : "",
+      usage.pids !== undefined && usage.pids !== null ? `PIDs ${usage.pids}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    lines.push(`- ${container.name} | ${container.image}`);
+    lines.push(`  ${usageBits}`);
+
+    if (container.composeProject || container.composeService) {
+      lines.push(
+        `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+      );
+    }
+
+    if (usage.sampledAt) {
+      lines.push(`  Sampled: ${usage.sampledAt}`);
     }
   }
 
@@ -767,6 +948,31 @@ export function formatDockerContainerDetails(status: WindowsHostStatus, containe
     lines.push(`Size: ${container.size}`);
   }
 
+  if (container.resourceUsage) {
+    const usageBits = [
+      container.resourceUsage.cpuPercent !== undefined && container.resourceUsage.cpuPercent !== null
+        ? `CPU ${container.resourceUsage.cpuPercent.toFixed(2)}%`
+        : "",
+      container.resourceUsage.memoryUsage ? `Mem ${container.resourceUsage.memoryUsage}` : "",
+      container.resourceUsage.memoryPercent !== undefined && container.resourceUsage.memoryPercent !== null
+        ? `Mem% ${container.resourceUsage.memoryPercent.toFixed(2)}%`
+        : "",
+      container.resourceUsage.netIO ? `Net ${container.resourceUsage.netIO}` : "",
+      container.resourceUsage.blockIO ? `Block ${container.resourceUsage.blockIO}` : "",
+      container.resourceUsage.pids !== undefined && container.resourceUsage.pids !== null
+        ? `PIDs ${container.resourceUsage.pids}`
+        : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    if (usageBits) {
+      lines.push(`Usage: ${usageBits}`);
+    }
+    if (container.resourceUsage.sampledAt) {
+      lines.push(`Usage sampled: ${container.resourceUsage.sampledAt}`);
+    }
+  }
+
   if (container.error) {
     lines.push(`Error: ${container.error}`);
   }
@@ -783,6 +989,69 @@ export function formatDockerContainerDetails(status: WindowsHostStatus, containe
         .filter((part, index, parts) => Boolean(part) && parts.indexOf(part) === index)
         .join(", ");
       lines.push(`- ${source}${mount.destination}${modeParts ? ` | ${modeParts}` : ""}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerRecentActivity(
+  status: WindowsHostStatus,
+  options?: {
+    state?: string;
+    sinceHours?: number;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const state = normalize(options?.state);
+  const sinceHours = Math.min(Math.max(options?.sinceHours ?? 72, 1), 24 * 30);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+  const cutoff = Date.now() - sinceHours * 60 * 60 * 1000;
+  const containers = docker.containers
+    .filter((container) => !state || container.state.toLowerCase() === state)
+    .map((container) => ({ container, latestTimestamp: getDockerLatestActivityTimestamp(container) }))
+    .filter(({ latestTimestamp }) => Number.isFinite(latestTimestamp) && latestTimestamp >= cutoff)
+    .sort((left, right) => right.latestTimestamp - left.latestTimestamp)
+    .slice(0, limit);
+
+  const filters = [
+    options?.state ? `state=${options.state}` : "",
+    `sinceHours=${sinceHours}`
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker recent activity (${filters}):`,
+    ""
+  ];
+
+  if (containers.length === 0) {
+    lines.push("- No containers matched that activity window.");
+    return lines.join("\n");
+  }
+
+  for (const { container, latestTimestamp } of containers) {
+    const latestAt = new Date(latestTimestamp).toISOString();
+    const activityBits = [
+      container.startedAt ? `started ${container.startedAt}` : "",
+      container.finishedAt ? `finished ${container.finishedAt}` : "",
+      container.createdAt ? `created ${container.createdAt}` : "",
+      container.restartCount !== undefined && container.restartCount !== null ? `restartCount ${container.restartCount}` : "",
+      container.exitCode !== undefined && container.exitCode !== null ? `exitCode ${container.exitCode}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+
+    lines.push(`- ${container.name} | ${container.state} | latest ${latestAt}`);
+    if (activityBits) {
+      lines.push(`  ${activityBits}`);
     }
   }
 

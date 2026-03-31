@@ -4,12 +4,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import {
+  formatDockerComposeHealth,
   formatDockerContainerDetails,
   formatDockerContainers,
   formatDockerImages,
   formatDockerIssues,
   formatDockerNetworks,
   formatDockerProjects,
+  formatDockerRecentActivity,
+  formatDockerResourceUsage,
   formatDockerStatus,
   formatPlexStatus,
   formatWindowsHostStatus,
@@ -102,7 +105,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.8"
+    version: "0.2.9"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -391,6 +394,104 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to list Docker networks: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_resource_usage",
+    "Use this to list live Docker resource usage from the latest local Windows host snapshot.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image substring filter"),
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, project, limit }) => {
+      return withAudit("get_docker_resource_usage", { name, project, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerResourceUsage(status, { name, project, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_resource_usage returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Docker resource usage: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_recent_activity",
+    "Use this to list recently started, finished, or created Docker containers from the local Windows host snapshot.",
+    {
+      state: z
+        .enum(["running", "exited", "paused", "restarting", "created", "dead"])
+        .optional()
+        .describe("Optional Docker state filter"),
+      sinceHours: z.number().int().min(1).max(24 * 30).optional().describe("Activity lookback window in hours, from 1 to 720"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ state, sinceHours, limit }) => {
+      return withAudit("get_docker_recent_activity", { state, sinceHours, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerRecentActivity(status, { state, sinceHours, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_recent_activity returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Docker recent activity: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_compose_health",
+    "Use this to summarize Docker Compose project health from the local Windows host snapshot.",
+    {
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of projects to return, from 1 to 50")
+    },
+    async ({ project, limit }) => {
+      return withAudit("get_docker_compose_health", { project, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerComposeHealth(status, { project, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_compose_health returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Docker Compose health: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
