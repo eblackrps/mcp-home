@@ -86,6 +86,35 @@ npm run test:openai:mcp
 npm run test:anthropic:mcp
 ```
 
+## ChatGPT with OAuth
+
+If you want to connect this server to ChatGPT without leaving the endpoint unauthenticated, use the built-in OAuth mode.
+
+Set these values in [`.env`](C:/MCP@home/.env):
+
+```text
+MCP_AUTH_MODE=oauth
+MCP_SERVER_URL=https://your-public-hostname/mcp
+MCP_OAUTH_PASSWORD=your-shared-password
+```
+
+If `MCP_OAUTH_PASSWORD` is left blank, the server falls back to `MCP_AUTH_TOKEN` as the login password.
+
+Then restart the stack and verify local auth metadata:
+
+```powershell
+docker compose -f docker-compose.tailscale.yml up -d --build
+npm run smoke:http
+```
+
+When OAuth mode is working, the smoke test should show:
+
+- a successful `/health` response
+- the protected resource metadata URL
+- a `401` on `/mcp` with a `WWW-Authenticate` header pointing clients at OAuth metadata
+
+After that, re-enable `tailscale funnel` and connect the app from ChatGPT in Developer mode using your public MCP URL. ChatGPT will open a browser login step where you enter the shared password.
+
 ## Recommended remote path: Caddy + Tailscale Funnel
 
 This is the cleanest home setup if you do not want to open router ports.

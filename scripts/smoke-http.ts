@@ -2,9 +2,9 @@ import "dotenv/config";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
-const serverUrl = process.env.MCP_SERVER_URL ?? "http://127.0.0.1:8787/mcp";
 const healthUrl = process.env.MCP_HEALTH_URL ?? "http://127.0.0.1:8787/health";
 const authToken = process.env.MCP_AUTH_TOKEN;
+const authMode = process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer";
 
 type TextContent = {
   type: "text";
@@ -38,6 +38,51 @@ async function main() {
   }
 
   const health = await healthResponse.json();
+  const localBaseUrl = new URL(healthUrl).origin;
+  const serverUrl = `${localBaseUrl}/mcp`;
+
+  if (authMode === "oauth") {
+    const protectedResourceMetadataUrl = `${localBaseUrl}/.well-known/oauth-protected-resource/mcp`;
+    const metadataResponse = await fetch(protectedResourceMetadataUrl);
+    if (!metadataResponse.ok) {
+      throw new Error(`Protected resource metadata failed with status ${metadataResponse.status}`);
+    }
+
+    const authProbe = await fetch(`${localBaseUrl}/mcp`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: "probe",
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-11-05",
+          capabilities: {},
+          clientInfo: { name: "oauth-smoke-test", version: "0.1.0" }
+        }
+      })
+    });
+
+    if (authProbe.status !== 401) {
+      throw new Error(`Expected /mcp to require OAuth with 401, got ${authProbe.status}`);
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          health,
+          authMode,
+          protectedResourceMetadataUrl,
+          wwwAuthenticate: authProbe.headers.get("www-authenticate")
+        },
+        null,
+        2
+      )
+    );
+    return;
+  }
 
   const transport = new StreamableHTTPClientTransport(new URL(serverUrl), {
     requestInit: authToken
