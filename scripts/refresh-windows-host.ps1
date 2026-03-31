@@ -4,9 +4,11 @@ $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 $dataDir = Join-Path $repoRoot "data\local"
 $hostStatusPath = Join-Path $dataDir "windows-host-status.json"
 $plexIndexPath = Join-Path $dataDir "plex-library-index.json"
+$plexActivityPath = Join-Path $dataDir "plex-activity.json"
 $pythonScriptPath = Join-Path $PSScriptRoot "export-plex-library.py"
 
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
+Add-Type -AssemblyName System.Net.Http
 
 function Get-IsoNow {
   return (Get-Date).ToString("o")
@@ -141,6 +143,174 @@ function Get-DockerContainers {
   return $containers
 }
 
+function Convert-PlexDateValue {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $null
+  }
+
+  $unixValue = 0L
+  if ([Int64]::TryParse($Value, [ref]$unixValue)) {
+    return [DateTimeOffset]::FromUnixTimeSeconds($unixValue).ToLocalTime().ToString("o")
+  }
+
+  try {
+    return ([DateTimeOffset]::Parse($Value)).ToString("o")
+  } catch {
+    return $Value
+  }
+}
+
+function Get-PlexAuthToken {
+  if (-not [string]::IsNullOrWhiteSpace($env:PLEX_TOKEN)) {
+    return $env:PLEX_TOKEN
+  }
+
+  $candidatePaths = @()
+  if (-not [string]::IsNullOrWhiteSpace($env:PLEX_PREFERENCES_PATH)) {
+    $candidatePaths += $env:PLEX_PREFERENCES_PATH
+  }
+
+  $candidatePaths += @(
+    (Join-Path $env:LOCALAPPDATA "Plex\Plex Media Server\Preferences.xml"),
+    (Join-Path $env:LOCALAPPDATA "Plex Media Server\Preferences.xml")
+  )
+
+  foreach ($candidate in $candidatePaths | Select-Object -Unique) {
+    if (-not (Test-Path $candidate)) {
+      continue
+    }
+
+    try {
+      [xml]$prefs = Get-Content -Path $candidate
+      if ($prefs.Preferences.PlexOnlineToken) {
+        return [string]$prefs.Preferences.PlexOnlineToken
+      }
+    } catch {
+      continue
+    }
+  }
+
+  return $null
+}
+
+function Invoke-PlexXmlRequest {
+  param(
+    [string]$Url,
+    [string]$Token
+  )
+
+  $client = [System.Net.Http.HttpClient]::new()
+  $client.Timeout = [TimeSpan]::FromSeconds(5)
+  try {
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+      $client.DefaultRequestHeaders.Add("X-Plex-Token", $Token)
+    }
+
+    $content = $client.GetStringAsync($Url).GetAwaiter().GetResult()
+    [xml]$xml = $content
+    return $xml
+  } catch {
+    return $null
+  } finally {
+    $client.Dispose()
+  }
+}
+
+function Convert-PlexActivityNode {
+  param($Node)
+
+  $durationMs = $null
+  if ($Node.duration) {
+    $parsedDuration = 0L
+    if ([Int64]::TryParse([string]$Node.duration, [ref]$parsedDuration)) {
+      $durationMs = $parsedDuration
+    }
+  }
+
+  $viewOffsetMs = $null
+  if ($Node.viewOffset) {
+    $parsedOffset = 0L
+    if ([Int64]::TryParse([string]$Node.viewOffset, [ref]$parsedOffset)) {
+      $viewOffsetMs = $parsedOffset
+    }
+  }
+
+  $seasonIndex = $null
+  if ($Node.parentIndex) {
+    $parsedSeason = 0
+    if ([int]::TryParse([string]$Node.parentIndex, [ref]$parsedSeason)) {
+      $seasonIndex = $parsedSeason
+    }
+  }
+
+  $episodeIndex = $null
+  if ($Node.index) {
+    $parsedEpisode = 0
+    if ([int]::TryParse([string]$Node.index, [ref]$parsedEpisode)) {
+      $episodeIndex = $parsedEpisode
+    }
+  }
+
+  return [ordered]@{
+    title = [string]$Node.title
+    type = [string]$Node.type
+    grandparentTitle = if ($Node.grandparentTitle) { [string]$Node.grandparentTitle } else { $null }
+    parentTitle = if ($Node.parentTitle) { [string]$Node.parentTitle } else { $null }
+    seasonIndex = $seasonIndex
+    episodeIndex = $episodeIndex
+    user = if ($Node.User -and $Node.User.title) { [string]$Node.User.title } else { $null }
+    player = if ($Node.Player -and $Node.Player.title) { [string]$Node.Player.title } else { $null }
+    state = if ($Node.Player -and $Node.Player.state) { [string]$Node.Player.state } else { $null }
+    viewedAt = if ($Node.viewedAt) { Convert-PlexDateValue -Value ([string]$Node.viewedAt) } else { $null }
+    originallyAvailableAt = if ($Node.originallyAvailableAt) { Convert-PlexDateValue -Value ([string]$Node.originallyAvailableAt) } else { $null }
+    durationMs = $durationMs
+    viewOffsetMs = $viewOffsetMs
+  }
+}
+
+function Get-PlexActivitySnapshot {
+  param(
+    [string]$BaseUrl,
+    [string]$Token
+  )
+
+  $sessionsXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions") -Token $Token
+  $historyXml = $null
+  if (-not [string]::IsNullOrWhiteSpace($Token)) {
+    $historyXml = Invoke-PlexXmlRequest -Url ($BaseUrl + "/status/sessions/history/all?sort=viewedAt:desc") -Token $Token
+  }
+
+  $activeSessions = @()
+  if ($sessionsXml -and $sessionsXml.MediaContainer) {
+    $activeSessions = @(
+      @($sessionsXml.MediaContainer.ChildNodes) |
+        Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.title } |
+        ForEach-Object { Convert-PlexActivityNode -Node $_ }
+    )
+  }
+
+  $recentHistory = @()
+  if ($historyXml -and $historyXml.MediaContainer) {
+    $recentHistory = @(
+      @($historyXml.MediaContainer.ChildNodes) |
+        Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.title } |
+        Select-Object -First 25 |
+        ForEach-Object { Convert-PlexActivityNode -Node $_ }
+    )
+  }
+
+  return [ordered]@{
+    fetchedAt = Get-IsoNow
+    tokenAvailable = -not [string]::IsNullOrWhiteSpace($Token)
+    sessionsAvailable = ($null -ne $sessionsXml)
+    historyAvailable = ($null -ne $historyXml)
+    activeSessions = $activeSessions
+    recentlyWatched = $recentHistory
+  }
+}
+
 $os = Get-CimInstance Win32_OperatingSystem
 $bootTime = $os.LastBootUpTime
 $uptimeSpan = (Get-Date) - $bootTime
@@ -207,6 +377,7 @@ $plexProcesses = Get-ProcessNames -Names @(
 )
 $plexServices = Convert-ServiceState -Names @("PlexUpdateService")
 $plexIdentity = $null
+$plexToken = Get-PlexAuthToken
 
 try {
   $plexIdentity = Invoke-RestMethod -Uri "$plexLocalUrl/identity" -TimeoutSec 3
@@ -222,6 +393,8 @@ if ($python -and (Test-Path $plexDbPath) -and (Test-Path $pythonScriptPath)) {
     $plexIndexSummary = $rawSummary | ConvertFrom-Json
   }
 }
+
+$plexActivitySnapshot = Get-PlexActivitySnapshot -BaseUrl $plexLocalUrl -Token $plexToken
 
 $plexReachable = $null -ne $plexIdentity
 $plexIndexedItems = if ($plexIndexSummary) { [int]$plexIndexSummary.indexedItemCount } else { 0 }
@@ -301,7 +474,10 @@ $payload = [ordered]@{
 $hostStatusJson = $payload | ConvertTo-Json -Depth 8
 $utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 [System.IO.File]::WriteAllText($hostStatusPath, $hostStatusJson, $utf8NoBom)
+$plexActivityJson = $plexActivitySnapshot | ConvertTo-Json -Depth 8
+[System.IO.File]::WriteAllText($plexActivityPath, $plexActivityJson, $utf8NoBom)
 Write-Host "Wrote host status to $hostStatusPath"
 if (Test-Path $plexIndexPath) {
   Write-Host "Wrote Plex library index to $plexIndexPath"
 }
+Write-Host "Wrote Plex activity snapshot to $plexActivityPath"

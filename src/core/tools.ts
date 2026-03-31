@@ -12,14 +12,20 @@ import {
 } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
+  browsePlexShowEpisodes,
   browsePlexChildren,
+  findPlexEpisodes,
+  formatPlexEpisodes,
   formatPlexChildren,
   formatPlexDuplicates,
   formatPlexItemDetails,
+  formatPlexShowEpisodes,
+  formatPlexShowSummary,
   formatPlexSearchResults,
   formatPlexTitleSearchResults,
   formatPlexSections,
   formatRecentPlexAdditions,
+  getPlexShowSummary,
   getPlexItemDetails,
   getRecentPlexAdditions,
   listPlexDuplicates,
@@ -27,6 +33,12 @@ import {
   searchPlexLibrary,
   searchPlexTitles
 } from "./plex.js";
+import {
+  formatPlexNowPlaying,
+  formatPlexRecentlyWatched,
+  formatPlexServerActivity,
+  readPlexActivitySnapshot
+} from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -69,7 +81,7 @@ async function withAudit<T>(
 export function createServer() {
   const server = new McpServer({
     name: "mcp-home",
-    version: "0.2.3"
+    version: "0.2.4"
   });
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
@@ -242,6 +254,92 @@ export function createServer() {
   );
 
   server.tool(
+    "get_plex_server_activity",
+    "Use this to read the current Plex activity snapshot, including active sessions and the latest watched item.",
+    {},
+    async () => {
+      return withAudit("get_plex_server_activity", undefined, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          return {
+            content: [{ type: "text", text: formatPlexServerActivity(snapshot) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_server_activity returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex activity: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_plex_now_playing",
+    "Use this to list active Plex playback sessions from the latest local activity snapshot.",
+    {},
+    async () => {
+      return withAudit("get_plex_now_playing", undefined, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          return {
+            content: [{ type: "text", text: formatPlexNowPlaying(snapshot) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_now_playing returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex now-playing sessions: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_plex_recently_watched",
+    "Use this to list recently watched Plex items from the latest local activity snapshot.",
+    {
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of recently watched items to return, from 1 to 25")
+    },
+    async ({ limit }) => {
+      return withAudit("get_plex_recently_watched", { limit }, async () => {
+        try {
+          const snapshot = await readPlexActivitySnapshot();
+          return {
+            content: [{ type: "text", text: formatPlexRecentlyWatched(snapshot, limit) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_recently_watched returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex recently watched items: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_plex_item_details",
     "Use this to get detailed Plex matches for a specific movie, show, album, artist, track, or episode title.",
     {
@@ -280,6 +378,38 @@ export function createServer() {
   );
 
   server.tool(
+    "get_plex_show_summary",
+    "Use this to summarize a Plex show with episode counts, seasons, genres, and recent additions.",
+    {
+      showTitle: z.string().min(1).describe("The show title to summarize")
+    },
+    async ({ showTitle }) => {
+      return withAudit("get_plex_show_summary", { showTitle }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const summary = getPlexShowSummary(index, { showTitle });
+
+          return {
+            content: [{ type: "text", text: formatPlexShowSummary(summary, index, { showTitle }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_show_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Plex show: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "list_plex_sections",
     "Use this to list the available Plex library sections from the local exported index.",
     {},
@@ -298,6 +428,40 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to list Plex sections: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "browse_plex_show_episodes",
+    "Use this to browse Plex show episodes with proper season and episode ordering.",
+    {
+      showTitle: z.string().min(1).describe("The show title whose episodes you want to browse"),
+      seasonIndex: z.number().int().min(1).optional().describe("Optional season number filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of episodes to return, from 1 to 100")
+    },
+    async ({ showTitle, seasonIndex, limit }) => {
+      return withAudit("browse_plex_show_episodes", { showTitle, seasonIndex, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const episodes = browsePlexShowEpisodes(index, { showTitle, seasonIndex, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexShowEpisodes(episodes, index, { showTitle, seasonIndex, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool browse_plex_show_episodes returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to browse Plex show episodes: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -337,6 +501,40 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to browse Plex children: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_plex_episode",
+    "Use this to search Plex episodes by episode title, optionally restricted to a specific show.",
+    {
+      query: z.string().min(1).describe("Episode title or phrase to search for"),
+      showTitle: z.string().min(1).optional().describe("Optional show title filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matching episodes to return, from 1 to 25")
+    },
+    async ({ query, showTitle, limit }) => {
+      return withAudit("find_plex_episode", { query, showTitle, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const episodes = findPlexEpisodes(index, { query, showTitle, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexEpisodes(episodes, index, { query, showTitle, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_plex_episode returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search Plex episodes: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

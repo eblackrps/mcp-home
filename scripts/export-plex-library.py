@@ -24,11 +24,17 @@ SECTION_TYPE_MAP = {
 }
 
 
-def to_iso(value: int | None) -> str | None:
-    if value in (None, 0):
+def to_iso(value: int | str | None) -> str | None:
+    if value in (None, "", 0, "0"):
         return None
 
-    return datetime.fromtimestamp(int(value)).astimezone().isoformat()
+    try:
+        return datetime.fromtimestamp(int(value)).astimezone().isoformat()
+    except (TypeError, ValueError, OSError, OverflowError):
+        try:
+            return datetime.fromisoformat(str(value)).astimezone().isoformat()
+        except ValueError:
+            return str(value)
 
 
 def trim(text: str | None, max_length: int = 220) -> str | None:
@@ -40,6 +46,13 @@ def trim(text: str | None, max_length: int = 220) -> str | None:
         return compact
 
     return f"{compact[: max_length - 3]}..."
+
+
+def split_csv(value: str | None) -> list[str]:
+    if not value:
+        return []
+
+    return [part.strip() for part in value.split(",") if part and part.strip()]
 
 
 def main() -> None:
@@ -77,6 +90,7 @@ def main() -> None:
 
     query = """
         SELECT
+            mi.id AS rating_key,
             mi.title,
             mi.metadata_type,
             ls.name AS section_name,
@@ -85,30 +99,68 @@ def main() -> None:
             grandparent.title AS grandparent_title,
             mi.summary,
             mi.added_at,
-            ls.id AS section_id
+            ls.id AS section_id,
+            mi.originally_available_at,
+            mi.rating,
+            mi.content_rating,
+            NULLIF(mi.studio, '') AS studio,
+            mi."index" AS item_index,
+            parent."index" AS parent_index,
+            MAX(media.duration) AS duration_ms,
+            GROUP_CONCAT(DISTINCT CASE WHEN tags.tag_type = 1 AND tags.tag <> '' THEN tags.tag END) AS genres
         FROM metadata_items mi
         LEFT JOIN library_sections ls ON ls.id = mi.library_section_id
         LEFT JOIN metadata_items parent ON parent.id = mi.parent_id
         LEFT JOIN metadata_items grandparent ON grandparent.id = parent.parent_id
+        LEFT JOIN media_items media ON media.metadata_item_id = mi.id
+        LEFT JOIN taggings tg ON tg.metadata_item_id = mi.id
+        LEFT JOIN tags ON tags.id = tg.tag_id
         WHERE mi.deleted_at IS NULL
           AND mi.title IS NOT NULL
           AND mi.title <> ''
           AND ls.id IS NOT NULL
           AND ls.name IS NOT NULL
           AND mi.metadata_type IN (1, 2, 3, 4, 8, 9, 10)
+        GROUP BY
+            mi.id,
+            mi.title,
+            mi.metadata_type,
+            ls.name,
+            mi.year,
+            parent.title,
+            grandparent.title,
+            mi.summary,
+            mi.added_at,
+            ls.id,
+            mi.originally_available_at,
+            mi.rating,
+            mi.content_rating,
+            mi.studio,
+            mi."index",
+            parent."index"
         ORDER BY ls.name, mi.title
     """
 
     for row in conn.execute(query):
+        item_type = TYPE_MAP.get(row["metadata_type"], str(row["metadata_type"]))
         item = {
+            "ratingKey": row["rating_key"],
             "title": row["title"],
-            "itemType": TYPE_MAP.get(row["metadata_type"], str(row["metadata_type"])),
+            "itemType": item_type,
             "section": row["section_name"] or "Unknown",
             "year": row["year"],
             "parentTitle": row["parent_title"],
             "grandparentTitle": row["grandparent_title"],
             "summarySnippet": trim(row["summary"]),
             "addedAt": to_iso(row["added_at"]),
+            "originallyAvailableAt": to_iso(row["originally_available_at"]),
+            "rating": row["rating"],
+            "contentRating": row["content_rating"] or None,
+            "studio": row["studio"] or None,
+            "durationMs": row["duration_ms"],
+            "genres": split_csv(row["genres"]),
+            "seasonIndex": row["parent_index"] if item_type == "episode" else None,
+            "episodeIndex": row["item_index"] if item_type == "episode" else None,
         }
         items.append(item)
         section_id = row["section_id"]

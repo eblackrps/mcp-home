@@ -11,6 +11,7 @@ export type PlexLibrarySection = {
 };
 
 export type PlexLibraryItem = {
+  ratingKey?: number;
   title: string;
   itemType: string;
   section: string;
@@ -19,6 +20,14 @@ export type PlexLibraryItem = {
   grandparentTitle?: string | null;
   summarySnippet?: string | null;
   addedAt?: string | null;
+  originallyAvailableAt?: string | null;
+  rating?: number | null;
+  contentRating?: string | null;
+  studio?: string | null;
+  durationMs?: number | null;
+  genres?: string[];
+  seasonIndex?: number | null;
+  episodeIndex?: number | null;
 };
 
 export type PlexLibraryIndex = {
@@ -64,6 +73,22 @@ type PlexBrowseChildrenOptions = {
 type PlexDuplicateOptions = {
   itemType?: string;
   section?: string;
+  limit?: number;
+};
+
+type PlexShowSummaryOptions = {
+  showTitle: string;
+};
+
+type PlexShowEpisodeBrowseOptions = {
+  showTitle: string;
+  seasonIndex?: number;
+  limit?: number;
+};
+
+type PlexEpisodeSearchOptions = {
+  query: string;
+  showTitle?: string;
   limit?: number;
 };
 
@@ -136,6 +161,10 @@ function assertPlexLibraryIndex(value: unknown): asserts value is PlexLibraryInd
     ) {
       throw new Error("Plex library item entries are missing required fields");
     }
+
+    if (record.genres !== undefined && !Array.isArray(record.genres)) {
+      throw new Error("Plex library item genres must be an array when present");
+    }
   }
 }
 
@@ -187,6 +216,18 @@ function scoreItem(item: PlexLibraryItem, query: string) {
 function formatContext(item: PlexLibraryItem) {
   const context = [item.grandparentTitle, item.parentTitle].filter((value): value is string => Boolean(value));
   return context.length > 0 ? context.join(" > ") : "";
+}
+
+function formatEpisodeCode(item: PlexLibraryItem) {
+  if (item.seasonIndex === null || item.seasonIndex === undefined) {
+    return item.episodeIndex !== null && item.episodeIndex !== undefined ? `E${String(item.episodeIndex).padStart(2, "0")}` : "";
+  }
+
+  if (item.episodeIndex === null || item.episodeIndex === undefined) {
+    return `S${String(item.seasonIndex).padStart(2, "0")}`;
+  }
+
+  return `S${String(item.seasonIndex).padStart(2, "0")}E${String(item.episodeIndex).padStart(2, "0")}`;
 }
 
 function uniqueStrings(values: Array<string | null | undefined>) {
@@ -415,9 +456,28 @@ export function formatPlexItemDetails(
     const addedAt = item.addedAt ? ` | added ${item.addedAt}` : "";
     lines.push(`- ${item.title} | ${item.itemType} | ${item.section}${year}${addedAt}`);
 
+    const meta = [
+      item.contentRating ? `rated ${item.contentRating}` : "",
+      item.studio ? `studio ${item.studio}` : "",
+      item.rating !== null && item.rating !== undefined ? `rating ${item.rating}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    if (meta) {
+      lines.push(`  ${meta}`);
+    }
+
     const context = formatContext(item);
     if (context) {
       lines.push(`  Context: ${context}`);
+    }
+
+    if (item.genres && item.genres.length > 0) {
+      lines.push(`  Genres: ${item.genres.join(", ")}`);
+    }
+
+    if (item.durationMs) {
+      lines.push(`  Duration: ${Math.round(item.durationMs / 60000)} min`);
     }
 
     if (item.summarySnippet) {
@@ -487,6 +547,233 @@ export function formatPlexChildren(
     const context = formatContext(item);
     if (context) {
       lines.push(`  Context: ${context}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function getPlexShowSummary(index: PlexLibraryIndex, options: PlexShowSummaryOptions) {
+  const showTitle = normalize(options.showTitle);
+  if (!showTitle) {
+    return {
+      show: undefined,
+      episodes: []
+    };
+  }
+
+  const show = index.items
+    .filter((item) => item.itemType === "show" && item.title.toLowerCase().includes(showTitle))
+    .sort((left, right) => sortByRelevance(left, right, showTitle))[0];
+
+  if (!show) {
+    return {
+      show: undefined,
+      episodes: []
+    };
+  }
+
+  const episodes = index.items
+    .filter((item) => item.itemType === "episode" && normalize(item.grandparentTitle) === normalize(show.title))
+    .sort((left, right) => {
+      const leftSeason = left.seasonIndex ?? 0;
+      const rightSeason = right.seasonIndex ?? 0;
+      if (leftSeason !== rightSeason) {
+        return leftSeason - rightSeason;
+      }
+
+      const leftEpisode = left.episodeIndex ?? 0;
+      const rightEpisode = right.episodeIndex ?? 0;
+      if (leftEpisode !== rightEpisode) {
+        return leftEpisode - rightEpisode;
+      }
+
+      return left.title.localeCompare(right.title);
+    });
+
+  return { show, episodes };
+}
+
+export function formatPlexShowSummary(
+  summary: { show?: PlexLibraryItem; episodes: PlexLibraryItem[] },
+  index: PlexLibraryIndex,
+  options: PlexShowSummaryOptions
+) {
+  if (!summary.show) {
+    return `No Plex show matched "${options.showTitle}".`;
+  }
+
+  const seasons = [...new Set(summary.episodes.map((episode) => episode.seasonIndex).filter((value) => value !== null && value !== undefined))];
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    `Show summary for "${summary.show.title}":`,
+    "",
+    `- Section: ${summary.show.section}`,
+    `- Episodes indexed: ${summary.episodes.length}`,
+    `- Seasons indexed: ${seasons.length}`,
+    `- Content rating: ${summary.show.contentRating || "unknown"}`,
+    `- Studio: ${summary.show.studio || "unknown"}`,
+    `- Rating: ${summary.show.rating !== null && summary.show.rating !== undefined ? summary.show.rating : "unknown"}`
+  ];
+
+  if (summary.show.genres && summary.show.genres.length > 0) {
+    lines.push(`- Genres: ${summary.show.genres.join(", ")}`);
+  }
+
+  if (summary.show.summarySnippet) {
+    lines.push("");
+    lines.push(summary.show.summarySnippet);
+  }
+
+  if (summary.episodes.length > 0) {
+    const recentEpisodes = [...summary.episodes]
+      .filter((episode) => episode.addedAt)
+      .sort(byNewestAddedAt)
+      .slice(0, 3);
+
+    if (recentEpisodes.length > 0) {
+      lines.push("");
+      lines.push("Most recently added episodes:");
+      for (const episode of recentEpisodes) {
+        const code = formatEpisodeCode(episode);
+        const addedAt = episode.addedAt ? ` | added ${episode.addedAt}` : "";
+        lines.push(`- ${code} ${episode.title}${addedAt}`);
+      }
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function browsePlexShowEpisodes(index: PlexLibraryIndex, options: PlexShowEpisodeBrowseOptions) {
+  const showTitle = normalize(options.showTitle);
+  const limit = Math.min(Math.max(options.limit ?? 25, 1), 100);
+
+  if (!showTitle) {
+    return [];
+  }
+
+  return index.items
+    .filter((item) => {
+      if (item.itemType !== "episode") {
+        return false;
+      }
+
+      if (!normalize(item.grandparentTitle)?.includes(showTitle)) {
+        return false;
+      }
+
+      if (options.seasonIndex !== undefined && item.seasonIndex !== options.seasonIndex) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((left, right) => {
+      const leftSeason = left.seasonIndex ?? 0;
+      const rightSeason = right.seasonIndex ?? 0;
+      if (leftSeason !== rightSeason) {
+        return leftSeason - rightSeason;
+      }
+
+      const leftEpisode = left.episodeIndex ?? 0;
+      const rightEpisode = right.episodeIndex ?? 0;
+      if (leftEpisode !== rightEpisode) {
+        return leftEpisode - rightEpisode;
+      }
+
+      return left.title.localeCompare(right.title);
+    })
+    .slice(0, limit);
+}
+
+export function formatPlexShowEpisodes(
+  episodes: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexShowEpisodeBrowseOptions
+) {
+  if (episodes.length === 0) {
+    return options.seasonIndex !== undefined
+      ? `No Plex episodes matched show "${options.showTitle}" for season ${options.seasonIndex}.`
+      : `No Plex episodes matched show "${options.showTitle}".`;
+  }
+
+  const seasonLabel = options.seasonIndex !== undefined ? ` season ${options.seasonIndex}` : "";
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    `Episodes for "${options.showTitle}"${seasonLabel}:`,
+    ""
+  ];
+
+  for (const episode of episodes) {
+    const code = formatEpisodeCode(episode);
+    const airDate = episode.originallyAvailableAt ? ` | aired ${episode.originallyAvailableAt}` : "";
+    lines.push(`- ${code} ${episode.title}${airDate}`);
+
+    if (episode.summarySnippet) {
+      lines.push(`  ${episode.summarySnippet}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function findPlexEpisodes(index: PlexLibraryIndex, options: PlexEpisodeSearchOptions) {
+  const query = normalize(options.query);
+  const showTitle = normalize(options.showTitle);
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  if (!query) {
+    return [];
+  }
+
+  return index.items
+    .filter((item) => {
+      if (item.itemType !== "episode") {
+        return false;
+      }
+
+      if (!item.title.toLowerCase().includes(query)) {
+        return false;
+      }
+
+      if (showTitle && !normalize(item.grandparentTitle)?.includes(showTitle)) {
+        return false;
+      }
+
+      return true;
+    })
+    .sort((left, right) => sortByRelevance(left, right, query))
+    .slice(0, limit);
+}
+
+export function formatPlexEpisodes(
+  episodes: PlexLibraryItem[],
+  index: PlexLibraryIndex,
+  options: PlexEpisodeSearchOptions
+) {
+  if (episodes.length === 0) {
+    return options.showTitle
+      ? `No Plex episodes matched "${options.query}" in show "${options.showTitle}".`
+      : `No Plex episodes matched "${options.query}".`;
+  }
+
+  const lines = [
+    `Generated: ${index.generatedAt}`,
+    options.showTitle
+      ? `Episode matches for "${options.query}" in "${options.showTitle}":`
+      : `Episode matches for "${options.query}":`,
+    ""
+  ];
+
+  for (const episode of episodes) {
+    const code = formatEpisodeCode(episode);
+    const showTitle = episode.grandparentTitle ? ` | ${episode.grandparentTitle}` : "";
+    const airDate = episode.originallyAvailableAt ? ` | aired ${episode.originallyAvailableAt}` : "";
+    lines.push(`- ${code} ${episode.title}${showTitle}${airDate}`);
+
+    if (episode.summarySnippet) {
+      lines.push(`  ${episode.summarySnippet}`);
     }
   }
 

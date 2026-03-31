@@ -14,9 +14,15 @@ The initial toolset is intentionally conservative:
 - `get_docker_status`
 - `list_docker_containers`
 - `get_plex_status`
+- `get_plex_server_activity`
+- `get_plex_now_playing`
+- `get_plex_recently_watched`
 - `get_plex_item_details`
+- `get_plex_show_summary`
 - `list_plex_sections`
+- `browse_plex_show_episodes`
 - `browse_plex_children`
+- `find_plex_episode`
 - `search_plex_library`
 - `search_plex_titles`
 - `list_plex_duplicates`
@@ -106,9 +112,11 @@ That script:
 - captures a read-only Docker container snapshot from `docker ps -a`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
+- captures a Plex activity snapshot from local sessions and watch history when a local token is available
 - writes:
   - `data/local/windows-host-status.json`
   - `data/local/plex-library-index.json`
+  - `data/local/plex-activity.json`
 
 The current implementation expects Python 3 on the Windows host for the Plex database export. The MCP server stays read-only and only reads the generated JSON files.
 
@@ -118,9 +126,15 @@ Once you have refreshed the host data, these tools become useful:
 - `get_docker_status`
 - `list_docker_containers`
 - `get_plex_status`
+- `get_plex_server_activity`
+- `get_plex_now_playing`
+- `get_plex_recently_watched`
 - `get_plex_item_details`
+- `get_plex_show_summary`
 - `list_plex_sections`
+- `browse_plex_show_episodes`
 - `browse_plex_children`
+- `find_plex_episode`
 - `search_plex_library`
 - `search_plex_titles`
 - `list_plex_duplicates`
