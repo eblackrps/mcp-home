@@ -5,56 +5,78 @@ A small TypeScript MCP server for home use that exposes the same read-only tools
 - `stdio` for local clients
 - Streamable HTTP for remote clients and API integrations
 
-The initial toolset is intentionally conservative:
+The project is aimed at a home Windows machine with Docker Desktop and Plex, but the MCP server itself stays read-only and works cleanly with:
 
-- `ping`
-- `get_time`
-- `list_docker_commands`
-- `list_plex_commands`
-- `find_plex`
-- `get_homelab_status`
-- `get_host_status`
-- `get_docker_status`
-- `list_docker_containers`
-- `get_docker_projects`
-- `get_docker_issues`
-- `get_docker_container_details`
-- `list_docker_images`
-- `list_docker_networks`
-- `get_docker_resource_usage`
-- `get_docker_recent_activity`
-- `get_docker_compose_health`
-- `get_docker_project_details`
-- `list_docker_volumes`
-- `get_docker_cleanup_candidates`
-- `get_plex_status`
-- `get_plex_server_activity`
-- `get_plex_now_playing`
-- `get_plex_recently_watched`
-- `get_plex_continue_watching`
-- `get_plex_on_deck`
-- `find_plex_unwatched`
-- `get_plex_item_details`
-- `browse_plex_by_genre`
-- `browse_plex_by_decade`
-- `get_plex_library_stats`
-- `get_plex_show_summary`
-- `get_plex_season_summary`
-- `get_recently_aired_episodes`
-- `find_plex_series_gaps`
-- `list_plex_sections`
-- `browse_plex_show_episodes`
-- `browse_plex_children`
-- `find_plex_episode`
-- `search_plex_library`
-- `search_plex_titles`
-- `list_plex_duplicates`
-- `get_recent_plex_additions`
-- `list_notes`
-- `search_notes`
-- `read_note`
+- local Claude-compatible clients over `stdio`
+- ChatGPT over remote OAuth-protected MCP
+- your own apps over Streamable HTTP
+
+## What you get
+
+- one shared tool registry with both `stdio` and HTTP transports
+- Windows host refresh scripts for Docker Desktop, Plex, and Corsair iCUE status
+- a searchable exported Plex library index plus live Plex activity snapshots
+- OAuth support for ChatGPT and bearer-token support for generic remote clients
+- Docker, Caddy, and Tailscale deployment options
+- audit logging plus smoke and production verification scripts
+
+## Tool groups
+
+- Discovery:
+  - `list_docker_commands`
+  - `list_plex_commands`
+  - `find_plex`
+- Host and notes:
+  - `ping`
+  - `get_time`
+  - `get_homelab_status`
+  - `get_host_status`
+  - `list_notes`
+  - `search_notes`
+  - `read_note`
+- Docker:
+  - container status, projects, images, networks, volumes, cleanup candidates, recent activity, and resource usage
+- Plex:
+  - library discovery, title search, natural lookup, show and season summaries, recent additions, on-deck and continue-watching data, unwatched reports, and duplicate detection
 
 For natural Plex requests, start with `find_plex`. It is the easiest way to ask for things like `Sopranos`, `Sopranos season 2`, or `Pine Barrens` without remembering the exact specialized tool name first.
+
+## Quick start
+
+1. Install dependencies:
+
+   ```bash
+   npm install
+   ```
+
+2. Copy the environment file:
+
+   ```powershell
+   Copy-Item .env.example .env
+   ```
+
+3. If you want Docker, Plex, or Windows host tools, refresh the local snapshots:
+
+   ```powershell
+   npm run refresh:host
+   ```
+
+4. Pick the path you care about first:
+
+   - Local client only:
+     Run `npm run build`, then use `node dist/index-stdio.js` or the Claude setup in this README.
+   - Local HTTP verification:
+     Run `npm run dev:http`, then `npm run smoke:http`.
+   - ChatGPT over OAuth:
+     Use the Tailscale+Caddy path, then connect the published MCP URL in ChatGPT Developer mode.
+
+## Prerequisites
+
+- Node.js 22+
+- Windows 11 if you want the host refresh scripts exactly as provided
+- Python 3 if you want Plex library export from the local SQLite database
+- Docker Desktop if you want container-aware tooling
+- Tailscale if you want the recommended public deployment path
 
 ## Why this shape
 
@@ -83,7 +105,7 @@ mcp-home/
   Dockerfile
 ```
 
-## Local development
+## Local development and verification
 
 1. Install dependencies:
 
@@ -133,6 +155,8 @@ mcp-home/
    ```powershell
    npm run verify:prod
    ```
+
+If you only want local Claude or another local `stdio` client, you can stop here. You do not need Caddy, Tailscale, ChatGPT OAuth, or separate API keys for that local-only path.
 
 ## Windows host refresh
 
@@ -275,12 +299,12 @@ Your reverse proxy must expose these OAuth routes publicly, not just `/mcp`:
 - `/authorize`
 - `/register`
 - `/token`
+- `/revoke`
+- `/oauth/login`
 
 ## Production polish notes
 
 The container image now includes a built-in healthcheck against `/health`, and both Compose files wait for `mcp-home` to become healthy before starting Caddy. This gives you a more reliable startup path for local restarts, rebuilds, and tunnel reconnects.
-- `/revoke`
-- `/oauth/login`
 
 ## Recommended remote path: Caddy + Tailscale Funnel
 
@@ -449,6 +473,21 @@ For local development, `.env` uses repo-relative paths like `./notes` and `./dat
 Use `docker-compose.yml` when you want Caddy to terminate TLS directly for your own domain.
 
 Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tailscale Funnel to provide the public HTTPS URL.
+
+## Troubleshooting
+
+- `npm run smoke:http` hits the wrong target
+  The smoke script tries `MCP_HEALTH_URL`, then `127.0.0.1:${PORT}`, then `127.0.0.1:8788`, then the origin derived from `MCP_SERVER_URL`.
+- ChatGPT connects but does not show the newest tool list
+  Disconnect and reconnect the app, or remove and re-add it, then start a fresh chat.
+- Plex or Docker tools return stale data
+  Run `npm run refresh:host` on the Windows host, or install the scheduled refresh task.
+- `tailscale` is not recognized in PowerShell
+  Use the full executable path, for example `C:\Program Files\Tailscale\tailscale.exe`, or add Tailscale to `PATH`.
+- OpenAI or Anthropic tests fail even though ChatGPT works
+  ChatGPT subscriptions and API billing are separate. `npm run test:openai:mcp` and `npm run test:anthropic:mcp` need real API keys and a publicly reachable MCP URL.
+- Docker or Caddy starts but the stack is not ready yet
+  Check `docker ps` and wait for `mcp-home` to become `healthy` before testing the public endpoint.
 
 ## Security notes
 
