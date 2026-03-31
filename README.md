@@ -75,6 +75,17 @@ mcp-home/
    npm run smoke:http
    ```
 
+## Model API checks
+
+OpenAI and Anthropic cannot reach `http://localhost:8787/mcp` directly. Before using either API, expose your MCP server on a public HTTPS URL with Caddy plus a tunnel or your own domain, then set `MCP_SERVER_URL` in `.env`.
+
+Once that is in place:
+
+```powershell
+npm run test:openai:mcp
+npm run test:anthropic:mcp
+```
+
 ## Claude setup
 
 For local clients that can spawn stdio servers, point them at the built entrypoint:
@@ -95,28 +106,29 @@ On native Windows, Anthropic currently recommends wrapping `npx` commands with `
 ## OpenAI Responses API example
 
 ```ts
-import OpenAI from "openai";
-
-const client = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-
-const response = await client.responses.create({
-  model: "gpt-5",
-  input: "Search my notes for homelab and summarize what you find.",
-  tools: [
-    {
-      type: "mcp",
-      server_label: "home",
-      server_url: "https://your-domain.example.com/mcp",
-      headers: {
-        Authorization: `Bearer ${process.env.MCP_AUTH_TOKEN}`
-      },
-      allowed_tools: ["search_notes", "read_note"],
-      require_approval: "never"
-    }
-  ]
+const response = await fetch("https://api.openai.com/v1/responses", {
+  method: "POST",
+  headers: {
+    "content-type": "application/json",
+    authorization: `Bearer ${process.env.OPENAI_API_KEY}`
+  },
+  body: JSON.stringify({
+    model: "gpt-5",
+    input: "Search my notes for homelab and summarize what you find.",
+    tools: [
+      {
+        type: "mcp",
+        server_label: "home",
+        server_url: "https://your-domain.example.com/mcp",
+        authorization: process.env.MCP_AUTH_TOKEN,
+        allowed_tools: ["search_notes", "read_note"],
+        require_approval: "never"
+      }
+    ]
+  })
 });
 
-console.log(response.output_text);
+console.log(await response.json());
 ```
 
 ## Anthropic Messages API example

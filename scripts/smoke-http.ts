@@ -6,6 +6,31 @@ const serverUrl = process.env.MCP_SERVER_URL ?? "http://127.0.0.1:8787/mcp";
 const healthUrl = process.env.MCP_HEALTH_URL ?? "http://127.0.0.1:8787/health";
 const authToken = process.env.MCP_AUTH_TOKEN;
 
+type TextContent = {
+  type: "text";
+  text: string;
+};
+
+function getFirstText(content: unknown): string {
+  if (!Array.isArray(content) || content.length === 0) {
+    return "";
+  }
+
+  const first = content[0];
+  if (
+    first &&
+    typeof first === "object" &&
+    "type" in first &&
+    "text" in first &&
+    (first as TextContent).type === "text" &&
+    typeof (first as TextContent).text === "string"
+  ) {
+    return (first as TextContent).text;
+  }
+
+  return "";
+}
+
 async function main() {
   const healthResponse = await fetch(healthUrl);
   if (!healthResponse.ok) {
@@ -38,8 +63,8 @@ async function main() {
       arguments: { slug: "homelab" }
     });
 
-    const homelabText = homelab.content?.[0]?.type === "text" ? homelab.content[0].text : "";
-    const noteText = note.content?.[0]?.type === "text" ? note.content[0].text : "";
+    const homelabText = getFirstText(homelab.content);
+    const noteText = getFirstText(note.content);
 
     if (!tools.tools.some((tool) => tool.name === "get_homelab_status")) {
       throw new Error("get_homelab_status is missing from the advertised tool list");
