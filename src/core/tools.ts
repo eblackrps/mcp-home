@@ -3,7 +3,9 @@ import { fileURLToPath } from "node:url";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
+import { formatPlexStatus, formatWindowsHostStatus, readWindowsHostStatus } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
+import { formatPlexSearchResults, readPlexLibraryIndex, searchPlexLibrary } from "./plex.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -86,6 +88,106 @@ export function createServer() {
           log("tool get_homelab_status returned error", message);
           return {
             content: [{ type: "text", text: `Unable to read homelab status: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_host_status",
+    "Use this to read the current Windows host status snapshot, including Docker Desktop, Corsair iCUE, Plex, and system uptime. Optionally filter by component name.",
+    {
+      component: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional component filter, for example system, docker, corsair, or plex")
+    },
+    async ({ component }) => {
+      return withAudit("get_host_status", { component }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatWindowsHostStatus(status, component) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_host_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Windows host status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_plex_status",
+    "Use this to read the current Plex server status and library summary from the local Windows host snapshot.",
+    {},
+    async () => {
+      return withAudit("get_plex_status", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatPlexStatus(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_plex_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Plex status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "search_plex_library",
+    "Use this to search the local Plex library index by title, with optional section and item type filters.",
+    {
+      query: z.string().min(1).describe("Title or phrase to search for in Plex"),
+      section: z.string().min(1).optional().describe("Optional library section name, for example Movies or TV Shows"),
+      itemType: z
+        .enum(["movie", "show", "season", "episode", "artist", "album", "track"])
+        .optional()
+        .describe("Optional Plex item type filter"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of results to return, from 1 to 25")
+    },
+    async ({ query, section, itemType, limit }) => {
+      return withAudit("search_plex_library", { query, section, itemType, limit }, async () => {
+        try {
+          const index = await readPlexLibraryIndex();
+          const results = searchPlexLibrary(index, { query, section, itemType, limit });
+
+          return {
+            content: [{ type: "text", text: formatPlexSearchResults(results, index, { query, section, itemType, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool search_plex_library returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search Plex: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
             isError: true
           };
         }
