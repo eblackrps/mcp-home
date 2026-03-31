@@ -306,9 +306,28 @@ Keep this server read-only until you trust the deployment path and logging.
 
 Good next additions:
 
-- structured audit logging
 - per-tool auth policy
 - a separate admin-only MCP server for higher-risk tools
+
+## Audit logging
+
+Tool calls are now audit-logged as JSON lines with:
+
+- timestamp
+- tool name
+- success or failure
+- duration in milliseconds
+- a short sanitized argument summary
+
+By default, audit records are written to stderr and, if `MCP_AUDIT_LOG_PATH` is set, appended to that file as JSONL.
+
+Example:
+
+```json
+{"timestamp":"2026-03-31T16:00:00.000Z","event":"tool_call","tool":"read_note","ok":true,"durationMs":12,"argSummary":"slug=\"homelab\""}
+```
+
+Sensitive argument names like `token`, `secret`, `password`, `authorization`, `cookie`, and `key` are automatically redacted.
 
 ## References
 

@@ -5,4 +5,4 @@ dist/
 caddy_data/
 caddy_config/
 npm-debug.log*
-
+logs/
