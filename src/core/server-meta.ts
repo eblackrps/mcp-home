@@ -1,5 +1,7 @@
 export const SERVER_NAME = "mcp-home";
-export const SERVER_VERSION = "0.3.0";
+export const SERVER_VERSION = "0.3.1";
+
+export type ToolProfile = "full" | "public-safe";
 
 export const REGISTERED_TOOL_NAMES = [
   "ping",
@@ -59,6 +61,49 @@ export const REGISTERED_TOOL_NAMES = [
   "read_note"
 ] as const;
 
+export const PUBLIC_SAFE_TOOL_NAMES = [
+  "ping",
+  "get_time",
+  "list_home_commands",
+  "list_docker_commands",
+  "list_plex_commands",
+  "get_snapshot_status",
+  "get_operations_dashboard",
+  "find_home",
+  "find_docker",
+  "find_plex",
+  "get_docker_status",
+  "list_docker_containers",
+  "get_docker_projects",
+  "get_docker_issues",
+  "get_docker_compose_health",
+  "get_docker_cleanup_candidates",
+  "get_docker_restart_report",
+  "get_plex_status",
+  "get_plex_server_activity",
+  "get_plex_now_playing",
+  "get_plex_recently_watched",
+  "get_plex_continue_watching",
+  "get_plex_on_deck",
+  "find_plex_unwatched",
+  "get_plex_item_details",
+  "browse_plex_by_genre",
+  "browse_plex_by_decade",
+  "get_plex_library_stats",
+  "get_plex_show_summary",
+  "get_plex_season_summary",
+  "get_recently_aired_episodes",
+  "find_plex_series_gaps",
+  "list_plex_sections",
+  "browse_plex_show_episodes",
+  "browse_plex_children",
+  "find_plex_episode",
+  "search_plex_library",
+  "search_plex_titles",
+  "list_plex_duplicates",
+  "get_recent_plex_additions"
+] as const;
+
 export const CRITICAL_TOOL_NAMES = [
   "get_snapshot_status",
   "get_operations_dashboard",
@@ -69,6 +114,36 @@ export const CRITICAL_TOOL_NAMES = [
   "read_note"
 ] as const;
 
-export function formatRegisteredToolList() {
-  return REGISTERED_TOOL_NAMES.join(", ");
+export const PUBLIC_SAFE_CRITICAL_TOOL_NAMES = [
+  "get_snapshot_status",
+  "get_operations_dashboard",
+  "find_home",
+  "find_plex",
+  "get_docker_status",
+  "list_plex_commands"
+] as const;
+
+export function resolveToolProfile(value: string | null | undefined, fallback: ToolProfile): ToolProfile {
+  const normalized = value?.trim().toLowerCase();
+  if (normalized === "public-safe" || normalized === "public" || normalized === "safe") {
+    return "public-safe";
+  }
+
+  if (normalized === "full" || normalized === "private" || normalized === "private-admin") {
+    return "full";
+  }
+
+  return fallback;
+}
+
+export function getRegisteredToolNames(profile: ToolProfile = "full") {
+  return profile === "public-safe" ? PUBLIC_SAFE_TOOL_NAMES : REGISTERED_TOOL_NAMES;
+}
+
+export function getCriticalToolNames(profile: ToolProfile = "full") {
+  return profile === "public-safe" ? PUBLIC_SAFE_CRITICAL_TOOL_NAMES : CRITICAL_TOOL_NAMES;
+}
+
+export function formatRegisteredToolList(profile: ToolProfile = "full") {
+  return getRegisteredToolNames(profile).join(", ");
 }

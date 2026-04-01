@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CRITICAL_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "../src/core/server-meta.js";
+import { getCriticalToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "../src/core/server-meta.js";
 
 const authToken = process.env.MCP_AUTH_TOKEN;
 const authMode = process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer";
@@ -73,7 +73,7 @@ async function resolveHealthTarget() {
         continue;
       }
 
-      const health = (await response.json()) as { ok?: boolean; name?: string };
+      const health = (await response.json()) as { ok?: boolean; name?: string; toolProfile?: ToolProfile };
       return { healthUrl: candidate, health };
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -149,15 +149,12 @@ async function main() {
   try {
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
-    const missingTools = CRITICAL_TOOL_NAMES.filter((toolName) => !toolNames.includes(toolName));
+    const toolProfile = health.toolProfile ?? "full";
+    const missingTools = getCriticalToolNames(toolProfile).filter((toolName) => !toolNames.includes(toolName));
     if (missingTools.length > 0) {
       throw new Error(`Missing critical tools from the advertised list: ${missingTools.join(", ")}`);
     }
 
-    const note = await client.callTool({
-      name: "read_note",
-      arguments: { slug: "homelab" }
-    });
     const plex = await client.callTool({
       name: "find_plex",
       arguments: { query: "Sopranos" }
@@ -174,16 +171,16 @@ async function main() {
       name: "get_operations_dashboard",
       arguments: {}
     });
+    const home = await client.callTool({
+      name: "find_home",
+      arguments: { query: "Sopranos", limit: 3 }
+    });
 
-    const noteText = getFirstText(note.content);
     const plexText = getFirstText(plex.content);
     const dockerText = getFirstText(docker.content);
     const snapshotText = getFirstText(snapshot.content);
     const dashboardText = getFirstText(dashboard.content);
-
-    if (!noteText.includes("NAS: online")) {
-      throw new Error("read_note did not return the expected homelab note");
-    }
+    const homeText = getFirstText(home.content);
 
     if (!plexText.toLowerCase().includes("sopranos")) {
       throw new Error("find_plex did not return the expected Plex match");
@@ -201,18 +198,23 @@ async function main() {
       throw new Error("get_operations_dashboard did not return the expected dashboard summary");
     }
 
+    if (!homeText.toLowerCase().includes("sopranos")) {
+      throw new Error("find_home did not return the expected natural-language match");
+    }
+
     console.log(
       JSON.stringify(
         {
           healthUrl,
           health,
           serverName: SERVER_NAME,
+          toolProfile,
           toolNames,
-          notePreview: noteText.slice(0, 120),
           plexPreview: plexText.slice(0, 120),
           dockerPreview: dockerText.slice(0, 120),
           snapshotPreview: snapshotText.slice(0, 120),
-          dashboardPreview: dashboardText.slice(0, 120)
+          dashboardPreview: dashboardText.slice(0, 120),
+          homePreview: homeText.slice(0, 120)
         },
         null,
         2

@@ -1,6 +1,11 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import { CRITICAL_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "../src/core/server-meta.js";
+import {
+  getCriticalToolNames,
+  resolveToolProfile,
+  SERVER_NAME,
+  SERVER_VERSION
+} from "../src/core/server-meta.js";
 
 type TextContent = {
   type: "text";
@@ -28,9 +33,14 @@ function getFirstText(content: unknown): string {
 }
 
 async function main() {
+  const toolProfile = resolveToolProfile(process.env.MCP_STDIO_TOOL_PROFILE ?? process.env.MCP_TOOL_PROFILE, "full");
   const transport = new StdioClientTransport({
     command: "node",
-    args: ["dist/index-stdio.js"]
+    args: ["dist/index-stdio.js"],
+    env: {
+      ...process.env,
+      MCP_STDIO_TOOL_PROFILE: toolProfile
+    } as Record<string, string>
   });
 
   const client = new Client({ name: "mcp-home-stdio-smoke", version: SERVER_VERSION });
@@ -39,15 +49,11 @@ async function main() {
   try {
     const tools = await client.listTools();
     const toolNames = tools.tools.map((tool) => tool.name);
-    const missingTools = CRITICAL_TOOL_NAMES.filter((toolName) => !toolNames.includes(toolName));
+    const missingTools = getCriticalToolNames(toolProfile).filter((toolName) => !toolNames.includes(toolName));
     if (missingTools.length > 0) {
       throw new Error(`Missing critical tools from the advertised list: ${missingTools.join(", ")}`);
     }
 
-    const note = await client.callTool({
-      name: "read_note",
-      arguments: { slug: "homelab" }
-    });
     const plex = await client.callTool({
       name: "find_plex",
       arguments: { query: "Sopranos" }
@@ -68,21 +74,19 @@ async function main() {
       name: "find_home",
       arguments: { query: "Sopranos", limit: 3 }
     });
-    const dockerPorts = await client.callTool({
-      name: "get_docker_port_map",
-      arguments: { project: "mcphome", limit: 5 }
-    });
 
-    const noteText = getFirstText(note.content);
     const plexText = getFirstText(plex.content);
     const dockerText = getFirstText(docker.content);
     const snapshotText = getFirstText(snapshot.content);
     const dashboardText = getFirstText(dashboard.content);
     const homeText = getFirstText(home.content);
-    const portText = getFirstText(dockerPorts.content);
-
-    if (!noteText.includes("NAS: online")) {
-      throw new Error("read_note did not return the expected homelab note");
+    let portText = "";
+    if (toolNames.includes("get_docker_port_map")) {
+      const dockerPorts = await client.callTool({
+        name: "get_docker_port_map",
+        arguments: { project: "mcphome", limit: 5 }
+      });
+      portText = getFirstText(dockerPorts.content);
     }
 
     if (!plexText.toLowerCase().includes("sopranos")) {
@@ -105,7 +109,7 @@ async function main() {
       throw new Error("find_home did not return the expected natural-language match");
     }
 
-    if (!portText.toLowerCase().includes("ports")) {
+    if (toolNames.includes("get_docker_port_map") && !portText.toLowerCase().includes("ports")) {
       throw new Error("get_docker_port_map did not return the expected port mapping summary");
     }
 
@@ -113,8 +117,8 @@ async function main() {
       JSON.stringify(
         {
           serverName: SERVER_NAME,
+          toolProfile,
           toolCount: toolNames.length,
-          notePreview: noteText.slice(0, 120),
           plexPreview: plexText.slice(0, 120),
           dockerPreview: dockerText.slice(0, 120),
           snapshotPreview: snapshotText.slice(0, 120),

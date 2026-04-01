@@ -14,7 +14,7 @@ import {
   resolveOAuthPassword,
   resolveProtectedResourceUrl
 } from "../core/oauth.js";
-import { formatRegisteredToolList, SERVER_NAME } from "../core/server-meta.js";
+import { formatRegisteredToolList, resolveToolProfile, SERVER_NAME } from "../core/server-meta.js";
 import { createServer } from "../core/tools.js";
 
 export async function startHttp() {
@@ -22,6 +22,7 @@ export async function startHttp() {
   const port = Number(process.env.PORT ?? "8787");
   const token = process.env.MCP_AUTH_TOKEN;
   const authMode = (process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer") as "bearer" | "oauth" | "none";
+  const toolProfile = resolveToolProfile(process.env.MCP_HTTP_TOOL_PROFILE ?? process.env.MCP_TOOL_PROFILE, "public-safe");
   const passThroughAuth: express.RequestHandler = (_req, _res, next) => next();
 
   app.set("trust proxy", 1);
@@ -74,7 +75,7 @@ export async function startHttp() {
   }
 
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, name: SERVER_NAME });
+    res.json({ ok: true, name: SERVER_NAME, toolProfile });
   });
 
   let effectiveAuth: express.RequestHandler;
@@ -91,7 +92,7 @@ export async function startHttp() {
 
   app.all("/mcp", effectiveAuth, async (req, res) => {
     try {
-      const server = createServer();
+      const server = createServer({ profile: toolProfile });
       const transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: undefined
       });
@@ -113,6 +114,6 @@ export async function startHttp() {
   });
 
   app.listen(port, "0.0.0.0", () => {
-    log(`http MCP server listening on :${port} with auth mode ${authMode} and tools ${formatRegisteredToolList()}`);
+    log(`http MCP server listening on :${port} with auth mode ${authMode}, profile ${toolProfile}, and tools ${formatRegisteredToolList(toolProfile)}`);
   });
 }

@@ -4,6 +4,7 @@ import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
 import { formatSnapshotHeadline, readSnapshotOverview } from "./snapshots.js";
+import type { ToolProfile } from "./server-meta.js";
 
 function normalize(value: string | undefined) {
   return value?.trim().toLowerCase();
@@ -64,6 +65,10 @@ export async function formatNotesFind(
 }
 
 export async function formatOperationsDashboard(notesDir: string) {
+  return formatOperationsDashboardForProfile(notesDir, "full");
+}
+
+export async function formatOperationsDashboardForProfile(notesDir: string, profile: ToolProfile) {
   const checkedAt = new Date().toISOString();
   const snapshotOverview = await readSnapshotOverview();
   const [hostResult, activityResult, notesResult, homelabResult] = await Promise.allSettled([
@@ -97,7 +102,11 @@ export async function formatOperationsDashboard(notesDir: string) {
 
   if (hostResult.status === "fulfilled") {
     const host = hostResult.value;
-    lines.push(`Host: ${host.host.computerName} | ${host.summary}`);
+    if (profile === "full") {
+      lines.push(`Host: ${host.host.computerName} | ${host.summary}`);
+    } else {
+      lines.push(`Host summary: ${host.summary}`);
+    }
     if (host.docker) {
       lines.push(
         `Docker: ${host.docker.runningCount} running | ${host.docker.problemCount} problems | ${host.docker.imageCount} images | ${host.docker.networkCount} networks | ${host.docker.volumes.length} volumes`
@@ -123,18 +132,20 @@ export async function formatOperationsDashboard(notesDir: string) {
     );
   }
 
-  if (notesResult.status === "fulfilled") {
-    lines.push(`Notes: ${notesResult.value.length} available`);
-  } else {
-    lines.push(`Notes: unavailable | ${notesResult.reason instanceof Error ? notesResult.reason.message : String(notesResult.reason)}`);
-  }
+  if (profile === "full") {
+    if (notesResult.status === "fulfilled") {
+      lines.push(`Notes: ${notesResult.value.length} available`);
+    } else {
+      lines.push(`Notes: unavailable | ${notesResult.reason instanceof Error ? notesResult.reason.message : String(notesResult.reason)}`);
+    }
 
-  if (homelabResult.status === "fulfilled") {
-    lines.push(`Homelab: ${homelabResult.value.summary}`);
-  } else {
-    lines.push(
-      `Homelab: unavailable | ${homelabResult.reason instanceof Error ? homelabResult.reason.message : String(homelabResult.reason)}`
-    );
+    if (homelabResult.status === "fulfilled") {
+      lines.push(`Homelab: ${homelabResult.value.summary}`);
+    } else {
+      lines.push(
+        `Homelab: unavailable | ${homelabResult.reason instanceof Error ? homelabResult.reason.message : String(homelabResult.reason)}`
+      );
+    }
   }
 
   const actions: string[] = [];
@@ -165,11 +176,15 @@ export async function formatHomeFind(
     query: string;
     area?: "auto" | "docker" | "plex" | "notes" | "homelab";
     limit?: number;
+    profile?: ToolProfile;
   }
 ) {
   const query = options.query.trim();
   const area = options.area ?? "auto";
+  const profile = options.profile ?? "full";
   const limit = Math.min(Math.max(options.limit ?? 5, 1), 10);
+  const notesAllowed = profile === "full";
+  const homelabAllowed = profile === "full";
 
   if (!query) {
     return "Home finder:\n\n- A non-empty search query is required.";
@@ -196,11 +211,19 @@ export async function formatHomeFind(
   }
 
   if (area === "notes") {
+    if (!notesAllowed) {
+      lines.push('- Notes search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
     lines.push(await formatNotesFind(notesDir, query, limit));
     return lines.join("\n");
   }
 
   if (area === "homelab") {
+    if (!homelabAllowed) {
+      lines.push('- Homelab search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
     const status = await readHomelabStatus();
     const normalizedQuery = query.toLowerCase();
     const matches = status.services.filter((service) => {
@@ -221,20 +244,23 @@ export async function formatHomeFind(
   const [hostStatus, plexIndex, noteText, homelabStatus] = await Promise.all([
     readWindowsHostStatus(),
     readPlexLibraryIndex(),
-    formatNotesFind(notesDir, query, limit),
-    readHomelabStatus()
+    notesAllowed ? formatNotesFind(notesDir, query, limit) : Promise.resolve(""),
+    homelabAllowed ? readHomelabStatus() : Promise.resolve(null)
   ]);
 
   const dockerText = formatDockerFind(hostStatus, { query, limit });
   const plexResult = findPlex(plexIndex, { query, limit });
-  const homelabMatches = homelabStatus.services.filter((service) => {
-    const normalizedQuery = query.toLowerCase();
-    return (
-      service.name.toLowerCase().includes(normalizedQuery) ||
-      service.status.toLowerCase().includes(normalizedQuery) ||
-      service.details.toLowerCase().includes(normalizedQuery)
-    );
-  });
+  const homelabMatches =
+    homelabAllowed && homelabStatus
+      ? homelabStatus.services.filter((service) => {
+          const normalizedQuery = query.toLowerCase();
+          return (
+            service.name.toLowerCase().includes(normalizedQuery) ||
+            service.status.toLowerCase().includes(normalizedQuery) ||
+            service.details.toLowerCase().includes(normalizedQuery)
+          );
+        })
+      : [];
 
   if (hasPlexResults(plexResult)) {
     lines.push("Plex:");
@@ -248,13 +274,13 @@ export async function formatHomeFind(
     lines.push("");
   }
 
-  if (!noteText.includes("- No notes matched that query.")) {
+  if (notesAllowed && noteText && !noteText.includes("- No notes matched that query.")) {
     lines.push("Notes:");
     lines.push(noteText);
     lines.push("");
   }
 
-  if (homelabMatches.length > 0) {
+  if (homelabAllowed && homelabStatus && homelabMatches.length > 0) {
     lines.push("Homelab:");
     lines.push(formatHomelabStatus({ ...homelabStatus, services: homelabMatches }, undefined));
     lines.push("");

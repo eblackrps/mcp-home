@@ -19,6 +19,7 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 - natural-language entrypoints for home, Docker, notes, and Plex lookups
 - a searchable exported Plex library index plus live Plex activity snapshots
 - deeper Docker inspection for port mappings, mounts, restart patterns, and failure review
+- split tool profiles so remote HTTP can stay narrower while local stdio stays broader
 - OAuth support for ChatGPT and bearer-token support for generic remote clients
 - Docker, Caddy, and Tailscale deployment options
 - audit logging plus smoke and production verification scripts
@@ -55,6 +56,29 @@ For natural requests:
 - start with `find_plex` for Plex-first lookups like `Sopranos`, `Sopranos season 2`, or `Pine Barrens`
 - use `get_snapshot_status` when results feel old or inconsistent
 
+## Tool profiles
+
+The server now supports two tool profiles:
+
+- `full`
+  Intended for local and private use. This includes notes, homelab status, host details, deeper Docker inspection, and the full read-only tool surface.
+- `public-safe`
+  Intended for the remote HTTP path. This keeps high-value read-only Plex and Docker status tooling, but leaves out more private or infrastructure-detailed tools like notes, homelab, host details, Docker mount inspection, and low-level container inventory.
+
+Defaults:
+
+- HTTP uses `public-safe`
+- stdio uses `full`
+
+Environment variables:
+
+```text
+MCP_HTTP_TOOL_PROFILE=public-safe
+MCP_STDIO_TOOL_PROFILE=full
+```
+
+You can also override both with `MCP_TOOL_PROFILE`, but the per-transport variables are the better choice when you want ChatGPT to see a narrower surface than local tools.
+
 ## Quick start
 
 1. Install dependencies:
@@ -86,7 +110,7 @@ For natural requests:
    - Local client only:
      Run `npm run build`, then use `node dist/index-stdio.js` or the Claude setup in this README.
    - Local HTTP verification:
-     Run `npm run dev:http`, then `npm run smoke:http`.
+     Run `npm run dev:http`, then `npm run smoke:http`. By default this uses the `public-safe` HTTP profile.
    - ChatGPT over OAuth:
      Use the Tailscale+Caddy path, then connect the published MCP URL in ChatGPT Developer mode.
 
@@ -190,6 +214,12 @@ mcp-home/
    - `npm run smoke:http`
 
 If you only want local Claude or another local `stdio` client, you can stop here. You do not need Caddy, Tailscale, ChatGPT OAuth, or separate API keys for that local-only path.
+
+If you want a private full-surface HTTP server for your own LAN or tailnet use, set:
+
+```text
+MCP_HTTP_TOOL_PROFILE=full
+```
 
 ## Windows host refresh
 
@@ -320,6 +350,8 @@ For day-to-day use, these are the easiest broad entrypoints:
 - `find_plex` for Plex-first searches
 - `get_operations_dashboard` for one quick operational overview
 
+On the remote HTTP path, `find_home` will stay inside the tools exposed by the active profile. In the default `public-safe` profile, that means Plex and Docker rather than notes or homelab content.
+
 ## Model API checks
 
 OpenAI and Anthropic cannot reach `http://localhost:8787/mcp` directly. Before using either API, expose your MCP server on a public HTTPS URL with Caddy plus a tunnel or your own domain, then set `MCP_SERVER_URL` in `.env`.
@@ -378,6 +410,8 @@ Your reverse proxy must expose these OAuth routes publicly, not just `/mcp`:
 The container image now includes a built-in healthcheck against `/health`, and both Compose files wait for `mcp-home` to become healthy before starting Caddy. This gives you a more reliable startup path for local restarts, rebuilds, and tunnel reconnects.
 
 The host refresh path now also records a separate `snapshot-status.json` file, so the MCP server can tell you when the underlying Windows, Docker, and Plex data is old instead of silently answering from stale files.
+
+The HTTP transport now also reports its active tool profile in `/health`, which makes it easier to debug "why does ChatGPT not see this tool?" problems after a deployment.
 
 ## Recommended remote path: Caddy + Tailscale Funnel
 
@@ -553,6 +587,8 @@ Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tail
   The smoke script tries `MCP_HEALTH_URL`, then `127.0.0.1:${PORT}`, then `127.0.0.1:8788`, then the origin derived from `MCP_SERVER_URL`.
 - ChatGPT connects but does not show the newest tool list
   Disconnect and reconnect the app, or remove and re-add it, then start a fresh chat.
+- ChatGPT cannot see a note or host-specific tool you can use locally
+  Check the active HTTP profile. The default remote profile is `public-safe`, which intentionally hides more private tools. Use `list_home_commands` or `/health` to confirm what is exposed.
 - Plex or Docker tools return stale data
   Run `npm run refresh:host` on the Windows host, then use `get_snapshot_status` to confirm freshness. If the snapshots keep going stale, install the scheduled refresh task.
 - `tailscale` is not recognized in PowerShell
@@ -570,6 +606,7 @@ Keep this server read-only until you trust the deployment path and logging.
 
 - Use long random bearer tokens.
 - Keep `allowed_tools` narrow on every remote API call.
+- Prefer a narrower remote tool profile than your local one.
 - Do not expose shell, SSH, Docker control, or file writes on the same server as broad read-only tools.
 - Prefer Tailscale or Cloudflare Tunnel over raw router port forwarding.
 - Keep host-generated snapshots in `data/local/` out of version control. They can reveal local library names and machine details.

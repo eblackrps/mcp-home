@@ -25,7 +25,7 @@ import {
   formatWindowsHostStatus,
   readWindowsHostStatus
 } from "./host.js";
-import { formatHomeFind, formatNotesFind, formatOperationsDashboard } from "./home.js";
+import { formatHomeFind, formatNotesFind, formatOperationsDashboardForProfile } from "./home.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
   browsePlexByGenre,
@@ -75,7 +75,7 @@ import {
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 import { formatSnapshotStatus, readSnapshotOverview } from "./snapshots.js";
-import { SERVER_NAME, SERVER_VERSION } from "./server-meta.js";
+import { getRegisteredToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "./server-meta.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
 
@@ -504,13 +504,30 @@ async function withAudit<T>(
   }
 }
 
-export function createServer() {
+export function createServer(options?: { profile?: ToolProfile }) {
   const server = new McpServer({
     name: SERVER_NAME,
     version: SERVER_VERSION
   });
+  const profile = options?.profile ?? "full";
+  const allowedToolNames = new Set<string>(getRegisteredToolNames(profile));
+  const serverToolTarget = server as unknown as {
+    tool: (name: string, ...args: any[]) => unknown;
+  };
+  const originalTool = serverToolTarget.tool.bind(server);
+  serverToolTarget.tool = (name: string, ...args: any[]) => {
+    if (!allowedToolNames.has(name)) {
+      return server;
+    }
+
+    originalTool(name, ...args);
+    return server;
+  };
 
   const notesDir = process.env.NOTES_DIR ?? DEFAULT_NOTES_DIR;
+  const visibleHomeCatalog = HOME_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleDockerCatalog = DOCKER_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visiblePlexCatalog = PLEX_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
 
   server.tool("ping", "Use this to verify that the MCP server is reachable.", {}, async () => {
     return withAudit("ping", undefined, async () => ({
@@ -545,10 +562,11 @@ export function createServer() {
     },
     async ({ area, query }) => {
       return withAudit("list_home_commands", { area, query }, async () => {
-        const areaFiltered = !area || area === "all" ? HOME_COMMAND_CATALOG : HOME_COMMAND_CATALOG.filter((entry) => entry.group === area);
+        const scopedCatalog = !area || area === "all" ? visibleHomeCatalog : visibleHomeCatalog.filter((entry) => entry.group === area);
+        const text = [`Tool profile: ${profile}`, "", formatCommandCatalog("Home", scopedCatalog, query)].join("\n");
 
         return {
-          content: [{ type: "text", text: formatCommandCatalog("Home", areaFiltered, query) }]
+          content: [{ type: "text", text }]
         };
       });
     }
@@ -566,7 +584,7 @@ export function createServer() {
     },
     async ({ query }) => {
       return withAudit("list_docker_commands", { query }, async () => ({
-        content: [{ type: "text", text: formatCommandCatalog("Docker", DOCKER_COMMAND_CATALOG, query) }]
+        content: [{ type: "text", text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Docker", visibleDockerCatalog, query)].join("\n") }]
       }));
     }
   );
@@ -583,7 +601,7 @@ export function createServer() {
     },
     async ({ query }) => {
       return withAudit("list_plex_commands", { query }, async () => ({
-        content: [{ type: "text", text: formatCommandCatalog("Plex", PLEX_COMMAND_CATALOG, query) }]
+        content: [{ type: "text", text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Plex", visiblePlexCatalog, query)].join("\n") }]
       }));
     }
   );
@@ -619,7 +637,7 @@ export function createServer() {
       return withAudit("get_operations_dashboard", undefined, async () => {
         try {
           return {
-            content: [{ type: "text", text: await formatOperationsDashboard(notesDir) }]
+            content: [{ type: "text", text: await formatOperationsDashboardForProfile(notesDir, profile) }]
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
@@ -648,7 +666,7 @@ export function createServer() {
       return withAudit("find_home", { query, area, limit }, async () => {
         try {
           return {
-            content: [{ type: "text", text: await formatHomeFind(notesDir, { query, area, limit }) }]
+            content: [{ type: "text", text: await formatHomeFind(notesDir, { query, area, limit, profile }) }]
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";

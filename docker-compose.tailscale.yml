@@ -6,6 +6,7 @@ services:
     env_file:
       - .env
     environment:
+      MCP_HTTP_TOOL_PROFILE: public-safe
       NOTES_DIR: /app/notes
       HOMELAB_STATUS_PATH: /app/data/homelab-status.json
       WINDOWS_HOST_STATUS_PATH: /app/data/local/windows-host-status.json
