@@ -1,5 +1,5 @@
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
-import { formatDockerFind, readWindowsHostStatus } from "./host.js";
+import { formatDockerFind, formatHostFind, readWindowsHostStatus } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
@@ -107,6 +107,11 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
     } else {
       lines.push(`Host summary: ${host.summary}`);
     }
+    if (host.resources) {
+      lines.push(
+        `Host resources: CPU ${host.resources.cpu.loadPercent ?? "unknown"}% | RAM ${Math.round(host.resources.memory.percentUsed)}% used | ${host.resources.disks.length} disks | ${host.resources.network.adapterCount} adapters`
+      );
+    }
     if (host.docker) {
       lines.push(
         `Docker: ${host.docker.runningCount} running | ${host.docker.problemCount} problems | ${host.docker.imageCount} images | ${host.docker.networkCount} networks | ${host.docker.volumes.length} volumes`
@@ -151,6 +156,7 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   const actions: string[] = [];
   if (snapshotOverview.overallFreshness !== "fresh") {
     actions.push('Refresh snapshots with "npm run refresh:host" if these answers look old.');
+    actions.push("Use get_snapshot_recommendations to see the likely cause of the stale data.");
   }
   if (!snapshotOverview.scheduler.installed) {
     actions.push('Install the Windows scheduled refresh task with "npm run schedule:host-refresh".');
@@ -174,7 +180,7 @@ export async function formatHomeFind(
   notesDir: string,
   options: {
     query: string;
-    area?: "auto" | "docker" | "plex" | "notes" | "homelab";
+    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host";
     limit?: number;
     profile?: ToolProfile;
   }
@@ -185,6 +191,7 @@ export async function formatHomeFind(
   const limit = Math.min(Math.max(options.limit ?? 5, 1), 10);
   const notesAllowed = profile === "full";
   const homelabAllowed = profile === "full";
+  const hostAllowed = profile === "full";
 
   if (!query) {
     return "Home finder:\n\n- A non-empty search query is required.";
@@ -200,6 +207,16 @@ export async function formatHomeFind(
   if (area === "docker") {
     const status = await readWindowsHostStatus();
     lines.push(formatDockerFind(status, { query, limit }));
+    return lines.join("\n");
+  }
+
+  if (area === "host") {
+    if (!hostAllowed) {
+      lines.push('- Host search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const status = await readWindowsHostStatus();
+    lines.push(formatHostFind(status, { query, limit }));
     return lines.join("\n");
   }
 
@@ -274,6 +291,15 @@ export async function formatHomeFind(
     lines.push("");
   }
 
+  if (hostAllowed) {
+    const hostText = formatHostFind(hostStatus, { query, limit });
+    if (!hostText.includes("- No host components, resources, disks, or network adapters matched that query.")) {
+      lines.push("Host:");
+      lines.push(hostText);
+      lines.push("");
+    }
+  }
+
   if (notesAllowed && noteText && !noteText.includes("- No notes matched that query.")) {
     lines.push("Notes:");
     lines.push(noteText);
@@ -287,7 +313,7 @@ export async function formatHomeFind(
   }
 
   if (lines.length <= 3) {
-    lines.push("- No Plex, Docker, note, or homelab matches were found for that query.");
+    lines.push("- No Plex, Docker, host, note, or homelab matches were found for that query.");
   }
 
   return lines.join("\n").trimEnd();

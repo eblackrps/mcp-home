@@ -15,10 +15,11 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 
 - one shared tool registry with both `stdio` and HTTP transports
 - Windows host refresh scripts for Docker Desktop, Plex, and Corsair iCUE status
-- snapshot freshness reporting plus an operations dashboard for stale-data debugging
-- natural-language entrypoints for home, Docker, notes, and Plex lookups
+- snapshot freshness reporting, run history, and stale-data recommendations
+- natural-language entrypoints for home, host, Docker, notes, and Plex lookups
 - a searchable exported Plex library index plus live Plex activity snapshots
-- deeper Docker inspection for port mappings, mounts, restart patterns, and failure review
+- richer Windows host telemetry for CPU, memory, disks, and network adapters
+- deeper Docker inspection for port mappings, exposure classification, mounts, restart patterns, and triage review
 - split tool profiles so remote HTTP can stay narrower while local stdio stays broader
 - OAuth support for ChatGPT and bearer-token support for generic remote clients
 - Docker, Caddy, and Tailscale deployment options
@@ -32,29 +33,37 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `list_plex_commands`
   - `find_home`
   - `find_docker`
+  - `find_host`
   - `find_notes`
   - `find_plex`
 - Snapshots and dashboards:
   - `get_snapshot_status`
+  - `get_snapshot_history`
+  - `get_snapshot_recommendations`
   - `get_operations_dashboard`
 - Host and notes:
   - `ping`
   - `get_time`
   - `get_homelab_status`
   - `get_host_status`
+  - `get_host_resources`
+  - `list_host_disks`
+  - `get_host_network_summary`
   - `list_notes`
   - `search_notes`
   - `read_note`
 - Docker:
-  - container status, projects, images, networks, volumes, cleanup candidates, recent activity, resource usage, port maps, mount reports, and restart reports
+  - container status, projects, images, networks, volumes, cleanup candidates, recent activity, resource usage, port maps, exposure reports, mount reports, restart reports, and triage summaries
 - Plex:
   - library discovery, title search, natural lookup, show and season summaries, recent additions, on-deck and continue-watching data, unwatched reports, and duplicate detection
 
 For natural requests:
 
-- start with `find_home` when you are not sure whether the answer lives in Plex, Docker, notes, or homelab data
+- start with `find_home` when you are not sure whether the answer lives in Plex, Docker, host, notes, or homelab data
+- start with `find_host` for Windows-machine questions like `memory`, `C:`, `ethernet`, or `corsair`
 - start with `find_plex` for Plex-first lookups like `Sopranos`, `Sopranos season 2`, or `Pine Barrens`
 - use `get_snapshot_status` when results feel old or inconsistent
+- use `get_snapshot_recommendations` when you want the likely cause of stale or incomplete data
 
 ## Tool profiles
 
@@ -236,13 +245,16 @@ That script:
 - takes a lightweight lock so overlapping refresh runs do not clobber each other
 - writes snapshot files atomically to reduce half-written or partially updated data
 - reads Windows uptime plus Docker Desktop, Corsair iCUE, and Plex process or service state
+- captures Windows CPU load, memory use, disk capacity, and network adapter telemetry
 - captures a read-only Docker snapshot from `docker ps -a`, `docker inspect`, `docker stats --no-stream`, `docker image ls`, `docker network ls`, `docker volume ls`, and `docker system df`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
 - captures a Plex activity snapshot from local sessions, watch history, continue-watching hubs, on-deck hubs, and unwatched library sections when a local token is available
 - writes a freshness and scheduler summary that the MCP server can read back later
+- keeps a rolling snapshot refresh history so you can see whether failures are one-off or repeating
 - writes:
   - `data/local/snapshot-status.json`
+  - `data/local/snapshot-history.json`
   - `data/local/windows-host-status.json`
   - `data/local/plex-library-index.json`
   - `data/local/plex-activity.json`
@@ -253,12 +265,20 @@ Once you have refreshed the host data, these tools become useful:
 
 - `list_home_commands`
 - `get_snapshot_status`
+- `get_snapshot_history`
+- `get_snapshot_recommendations`
 - `get_operations_dashboard`
 - `find_home`
+- `find_host`
 - `find_docker`
 - `find_notes`
 - `list_docker_commands`
 - `get_host_status`
+- `get_host_resources`
+- `list_host_disks`
+- `get_host_network_summary`
+- `get_docker_exposure_report`
+- `get_docker_triage_report`
 - `get_docker_status`
 - `list_docker_containers`
 - `get_docker_projects`
@@ -325,7 +345,7 @@ powershell -ExecutionPolicy Bypass -File scripts/install-host-refresh-task.ps1 -
 
 This creates a user-level scheduled task named `MCP Home Host Refresh` that runs `scripts/refresh-windows-host.ps1`.
 
-The scheduled task uses a hidden PowerShell window, and `get_snapshot_status` will tell you whether the task is installed plus when it last ran.
+The scheduled task uses a hidden PowerShell window, and `get_snapshot_status` plus `get_snapshot_history` will tell you whether the task is installed, when it last ran, and whether refresh failures are repeating.
 
 ## Freshness and natural-language entrypoints
 
@@ -335,6 +355,12 @@ If the server feels stale during testing, start with:
 get_snapshot_status
 ```
 
+Then follow with:
+
+```text
+get_snapshot_recommendations
+```
+
 That reports:
 
 - whether the last host refresh completed successfully
@@ -342,9 +368,12 @@ That reports:
 - how old each snapshot is
 - whether each snapshot is `fresh`, `late`, `stale`, or missing
 
+`get_snapshot_history` adds the recent run timeline, which is especially useful when you are trying to separate a one-time refresh miss from a recurring host-side failure.
+
 For day-to-day use, these are the easiest broad entrypoints:
 
 - `find_home` for cross-domain lookup
+- `find_host` for Windows CPU, memory, disk, adapter, and component questions
 - `find_docker` for containers, projects, images, networks, and volumes
 - `find_notes` for local markdown notes
 - `find_plex` for Plex-first searches
@@ -590,7 +619,7 @@ Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tail
 - ChatGPT cannot see a note or host-specific tool you can use locally
   Check the active HTTP profile. The default remote profile is `public-safe`, which intentionally hides more private tools. Use `list_home_commands` or `/health` to confirm what is exposed.
 - Plex or Docker tools return stale data
-  Run `npm run refresh:host` on the Windows host, then use `get_snapshot_status` to confirm freshness. If the snapshots keep going stale, install the scheduled refresh task.
+  Run `npm run refresh:host` on the Windows host, then use `get_snapshot_status` and `get_snapshot_recommendations` to confirm freshness and see the likely cause. If the snapshots keep going stale, install the scheduled refresh task.
 - `tailscale` is not recognized in PowerShell
   Use the full executable path, for example `C:\Program Files\Tailscale\tailscale.exe`, or add Tailscale to `PATH`.
 - OpenAI or Anthropic tests fail even though ChatGPT works
@@ -598,7 +627,7 @@ Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tail
 - Docker or Caddy starts but the stack is not ready yet
   Check `docker ps` and wait for `mcp-home` to become `healthy` before testing the public endpoint.
 - The host refresh looks healthy, but results still seem old
-  `snapshot-status.json` and `get_snapshot_status` will show whether only one of the three snapshot files is lagging, which is common when Plex export prerequisites are missing.
+  `snapshot-status.json`, `snapshot-history.json`, `get_snapshot_status`, and `get_snapshot_recommendations` will show whether only one of the three snapshot files is lagging or whether the refresh has been failing repeatedly, which is common when Plex export prerequisites are missing.
 
 ## Security notes
 

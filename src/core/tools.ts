@@ -4,6 +4,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import {
+  formatDockerExposureReport,
   formatDockerFind,
   formatDockerMountReport,
   formatDockerPortMap,
@@ -20,6 +21,11 @@ import {
   formatDockerRestartReport,
   formatDockerResourceUsage,
   formatDockerStatus,
+  formatDockerTriageReport,
+  formatHostDisks,
+  formatHostFind,
+  formatHostNetworkSummary,
+  formatHostResources,
   formatDockerVolumes,
   formatPlexStatus,
   formatWindowsHostStatus,
@@ -74,7 +80,13 @@ import {
   readPlexActivitySnapshot
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
-import { formatSnapshotStatus, readSnapshotOverview } from "./snapshots.js";
+import {
+  formatSnapshotHistory,
+  formatSnapshotRecommendations,
+  formatSnapshotStatus,
+  readSnapshotHistory,
+  readSnapshotOverview
+} from "./snapshots.js";
 import { getRegisteredToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "./server-meta.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -182,6 +194,18 @@ const DOCKER_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Surface restart counts, recent failures, and exit patterns across Docker containers.",
     options: ["name", "project", "sinceHours", "includeHealthy", "limit"],
     example: "get_docker_restart_report sinceHours=168"
+  },
+  {
+    name: "get_docker_exposure_report",
+    summary: "Classify published Docker ports as public, loopback-only, or host-IP bindings.",
+    options: ["name", "project", "limit"],
+    example: "get_docker_exposure_report project=mcphome"
+  },
+  {
+    name: "get_docker_triage_report",
+    summary: "Roll up Docker health, restart hotspots, exposed ports, and resource pressure into one triage view.",
+    options: ["project", "sinceHours"],
+    example: "get_docker_triage_report sinceHours=168"
   }
 ];
 
@@ -364,6 +388,19 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_snapshot_status"
   },
   {
+    name: "get_snapshot_history",
+    group: "snapshot",
+    summary: "Show recent refresh runs with durations, warnings, and failures so stale-data problems are easier to diagnose.",
+    options: ["limit"],
+    example: "get_snapshot_history limit=10"
+  },
+  {
+    name: "get_snapshot_recommendations",
+    group: "snapshot",
+    summary: "Explain likely causes of stale or incomplete snapshots and recommend the next troubleshooting steps.",
+    example: "get_snapshot_recommendations"
+  },
+  {
     name: "get_operations_dashboard",
     group: "snapshot",
     summary: "Roll up snapshot freshness, Windows host health, Docker, Plex activity, notes, and homelab status into one report.",
@@ -372,7 +409,7 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
   {
     name: "find_home",
     group: "discovery",
-    summary: "Natural cross-domain finder that searches Plex, Docker, notes, and homelab data from a single query.",
+    summary: "Natural cross-domain finder that searches Plex, Docker, host, notes, and homelab data from a single query.",
     options: ["query", "area", "limit"],
     example: "find_home query=Sopranos"
   },
@@ -382,6 +419,13 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Natural Docker finder for containers, projects, images, networks, or volumes.",
     options: ["query", "domain", "limit"],
     example: "find_docker query=mcp-home"
+  },
+  {
+    name: "find_host",
+    group: "host",
+    summary: "Natural host finder for components, CPU and memory, disks, and network adapters.",
+    options: ["query", "domain", "limit"],
+    example: "find_host query=memory"
   },
   {
     name: "find_notes",
@@ -396,6 +440,26 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Read the Windows host snapshot with system, Docker, Corsair, and Plex component health.",
     options: ["component"],
     example: "get_host_status component=docker"
+  },
+  {
+    name: "get_host_resources",
+    group: "host",
+    summary: "Show CPU, memory, disk, and network telemetry from the Windows host snapshot.",
+    example: "get_host_resources"
+  },
+  {
+    name: "list_host_disks",
+    group: "host",
+    summary: "List Windows disks with used and free space, filesystem, and volume labels.",
+    options: ["name", "limit"],
+    example: "list_host_disks name=C:"
+  },
+  {
+    name: "get_host_network_summary",
+    group: "host",
+    summary: "List host network adapters, IP addresses, gateways, and DNS settings.",
+    options: ["query", "limit"],
+    example: "get_host_network_summary query=ethernet"
   },
   {
     name: "get_homelab_status",
@@ -630,6 +694,54 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "get_snapshot_history",
+    "Use this to review recent snapshot refresh runs with timings, warnings, and failures.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of recent runs to include, from 1 to 100")
+    },
+    async ({ limit }) => {
+      return withAudit("get_snapshot_history", { limit }, async () => {
+        try {
+          const history = await readSnapshotHistory(limit);
+          return {
+            content: [{ type: "text", text: formatSnapshotHistory(history, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_snapshot_history returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to read snapshot history: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_snapshot_recommendations",
+    "Use this to explain likely causes of stale or incomplete snapshots and recommend the next troubleshooting steps.",
+    {},
+    async () => {
+      return withAudit("get_snapshot_recommendations", undefined, async () => {
+        try {
+          const [overview, history] = await Promise.all([readSnapshotOverview(), readSnapshotHistory(10)]);
+          return {
+            content: [{ type: "text", text: formatSnapshotRecommendations(overview, history) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_snapshot_recommendations returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to build snapshot recommendations: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "get_operations_dashboard",
     "Use this to roll up snapshot freshness, Windows host health, Docker, Plex activity, notes, and homelab status into one report.",
     {},
@@ -653,11 +765,11 @@ export function createServer(options?: { profile?: ToolProfile }) {
 
   server.tool(
     "find_home",
-    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, notes, or homelab data.",
+    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, notes, or homelab data.",
     {
       query: z.string().min(1).describe("Natural search phrase, for example Sopranos, backups, or mcp-home"),
       area: z
-        .enum(["auto", "docker", "plex", "notes", "homelab"])
+        .enum(["auto", "docker", "plex", "notes", "homelab", "host"])
         .optional()
         .describe("Optional scope if you already know the area to search"),
       limit: z.number().int().min(1).max(10).optional().describe("Maximum number of top matches to include, from 1 to 10")
@@ -706,6 +818,41 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to search Docker data: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_host",
+    "Use this as the natural Windows host entrypoint for components, CPU and memory, disks, or network adapters.",
+    {
+      query: z.string().min(1).describe("Natural host query, for example memory, C:, ethernet, or corsair"),
+      domain: z
+        .enum(["auto", "component", "resource", "disk", "network"])
+        .optional()
+        .describe("Optional host scope"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matches to return, from 1 to 25")
+    },
+    async ({ query, domain, limit }) => {
+      return withAudit("find_host", { query, domain, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatHostFind(status, { query, domain, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_host returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search host data: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -833,6 +980,96 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to read Windows host status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_host_resources",
+    "Use this to read CPU, memory, disk, and network telemetry from the Windows host snapshot.",
+    {},
+    async () => {
+      return withAudit("get_host_resources", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatHostResources(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_host_resources returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read host resources: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_host_disks",
+    "Use this to list Windows disks with used and free space plus filesystem and volume labels.",
+    {
+      name: z.string().min(1).optional().describe("Optional disk, volume label, or filesystem filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of disks to return, from 1 to 50")
+    },
+    async ({ name, limit }) => {
+      return withAudit("list_host_disks", { name, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatHostDisks(status, { name, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_host_disks returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list host disks: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_host_network_summary",
+    "Use this to list host network adapters, IP addresses, gateways, and DNS settings from the Windows host snapshot.",
+    {
+      query: z.string().min(1).optional().describe("Optional adapter, address, or DNS filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of adapters to return, from 1 to 50")
+    },
+    async ({ query, limit }) => {
+      return withAudit("get_host_network_summary", { query, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatHostNetworkSummary(status, { query, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_host_network_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read host network summary: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -1342,6 +1579,69 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to inspect Docker restart patterns: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_exposure_report",
+    "Use this to classify published Docker ports as public, loopback-only, or host-IP bindings from the latest snapshot.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image filter"),
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, project, limit }) => {
+      return withAudit("get_docker_exposure_report", { name, project, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerExposureReport(status, { name, project, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_exposure_report returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker exposure: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_triage_report",
+    "Use this to roll up Docker problems, restart hotspots, exposed ports, and resource pressure into one triage report.",
+    {
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      sinceHours: z.number().int().min(1).max(24 * 180).optional().describe("Failure and restart lookback window in hours")
+    },
+    async ({ project, sinceHours }) => {
+      return withAudit("get_docker_triage_report", { project, sinceHours }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerTriageReport(status, { project, sinceHours }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_triage_report returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to build Docker triage report: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

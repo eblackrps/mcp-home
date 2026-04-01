@@ -1,5 +1,5 @@
 export const SERVER_NAME = "mcp-home";
-export const SERVER_VERSION = "0.3.1";
+export const SERVER_VERSION = "0.4.0";
 
 export type ToolProfile = "full" | "public-safe";
 
@@ -10,13 +10,19 @@ export const REGISTERED_TOOL_NAMES = [
   "list_docker_commands",
   "list_plex_commands",
   "get_snapshot_status",
+  "get_snapshot_history",
+  "get_snapshot_recommendations",
   "get_operations_dashboard",
   "find_home",
   "find_docker",
+  "find_host",
   "find_notes",
   "find_plex",
   "get_homelab_status",
   "get_host_status",
+  "get_host_resources",
+  "list_host_disks",
+  "get_host_network_summary",
   "get_docker_status",
   "list_docker_containers",
   "get_docker_projects",
@@ -33,6 +39,8 @@ export const REGISTERED_TOOL_NAMES = [
   "get_docker_port_map",
   "get_docker_mount_report",
   "get_docker_restart_report",
+  "get_docker_exposure_report",
+  "get_docker_triage_report",
   "get_plex_status",
   "get_plex_server_activity",
   "get_plex_now_playing",
@@ -68,6 +76,8 @@ export const PUBLIC_SAFE_TOOL_NAMES = [
   "list_docker_commands",
   "list_plex_commands",
   "get_snapshot_status",
+  "get_snapshot_history",
+  "get_snapshot_recommendations",
   "get_operations_dashboard",
   "find_home",
   "find_docker",
@@ -79,6 +89,7 @@ export const PUBLIC_SAFE_TOOL_NAMES = [
   "get_docker_compose_health",
   "get_docker_cleanup_candidates",
   "get_docker_restart_report",
+  "get_docker_triage_report",
   "get_plex_status",
   "get_plex_server_activity",
   "get_plex_now_playing",
@@ -106,6 +117,7 @@ export const PUBLIC_SAFE_TOOL_NAMES = [
 
 export const CRITICAL_TOOL_NAMES = [
   "get_snapshot_status",
+  "get_snapshot_recommendations",
   "get_operations_dashboard",
   "find_home",
   "find_plex",
@@ -116,6 +128,7 @@ export const CRITICAL_TOOL_NAMES = [
 
 export const PUBLIC_SAFE_CRITICAL_TOOL_NAMES = [
   "get_snapshot_status",
+  "get_snapshot_recommendations",
   "get_operations_dashboard",
   "find_home",
   "find_plex",

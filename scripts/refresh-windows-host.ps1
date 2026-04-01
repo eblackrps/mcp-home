@@ -6,6 +6,7 @@ $hostStatusPath = Join-Path $dataDir "windows-host-status.json"
 $plexIndexPath = Join-Path $dataDir "plex-library-index.json"
 $plexActivityPath = Join-Path $dataDir "plex-activity.json"
 $snapshotStatusPath = Join-Path $dataDir "snapshot-status.json"
+$snapshotHistoryPath = Join-Path $dataDir "snapshot-history.json"
 $refreshLockPath = Join-Path $dataDir "refresh-windows-host.lock"
 $refreshTaskName = if ($env:HOST_REFRESH_TASK_NAME) { $env:HOST_REFRESH_TASK_NAME } else { "MCP Home Host Refresh" }
 $pythonScriptPath = Join-Path $PSScriptRoot "export-plex-library.py"
@@ -178,6 +179,174 @@ function Write-RefreshStatus {
   }
 
   Write-JsonAtomic -Path $snapshotStatusPath -Value $payload -Depth 8
+}
+
+function Append-RefreshHistory {
+  param(
+    [string]$Path,
+    [object]$Entry,
+    [int]$MaxEntries = 50
+  )
+
+  $entries = @()
+  if (Test-Path $Path) {
+    try {
+      $raw = Get-Content -Path $Path -Raw -ErrorAction Stop
+      if (-not [string]::IsNullOrWhiteSpace($raw)) {
+        $parsed = $raw | ConvertFrom-Json -ErrorAction Stop
+        if ($parsed -is [System.Collections.IEnumerable] -and -not ($parsed -is [string])) {
+          $entries = @($parsed)
+        } elseif ($parsed.entries) {
+          $entries = @($parsed.entries)
+        }
+      }
+    } catch {
+      $entries = @()
+    }
+  }
+
+  $entries += [pscustomobject]$Entry
+  if ($entries.Count -gt $MaxEntries) {
+    $entries = $entries | Select-Object -Last $MaxEntries
+  }
+
+  Write-JsonAtomic -Path $Path -Value ([ordered]@{
+      updatedAt = Get-IsoNow
+      entries = @($entries)
+    }) -Depth 8
+}
+
+function Get-DriveTypeName {
+  param([int]$DriveType)
+
+  switch ($DriveType) {
+    2 { return "removable" }
+    3 { return "fixed" }
+    4 { return "network" }
+    5 { return "cdrom" }
+    6 { return "ramdisk" }
+    default { return "unknown" }
+  }
+}
+
+function Get-HostResourceSnapshot {
+  param($OperatingSystem)
+
+  $processors = @(Get-CimInstance Win32_Processor)
+  $cpuName = if ($processors.Count -gt 0 -and $processors[0].Name) { [string]$processors[0].Name } else { "unknown" }
+  $logicalCores = if ($processors.Count -gt 0) {
+    [int](($processors | Measure-Object -Property NumberOfLogicalProcessors -Sum).Sum)
+  } else {
+    0
+  }
+  $loadPercent = if ($processors.Count -gt 0) {
+    [double]($processors | Measure-Object -Property LoadPercentage -Average).Average
+  } else {
+    $null
+  }
+  $maxClockMHz = if ($processors.Count -gt 0) {
+    [int](($processors | Measure-Object -Property MaxClockSpeed -Maximum).Maximum)
+  } else {
+    $null
+  }
+
+  $totalBytes = [int64]$OperatingSystem.TotalVisibleMemorySize * 1KB
+  $freeBytes = [int64]$OperatingSystem.FreePhysicalMemory * 1KB
+  $usedBytes = [Math]::Max($totalBytes - $freeBytes, 0)
+  $percentUsed = if ($totalBytes -gt 0) {
+    [Math]::Round(($usedBytes / $totalBytes) * 100, 2)
+  } else {
+    0
+  }
+
+  $disks = @(
+    Get-CimInstance Win32_LogicalDisk |
+      Where-Object { $_.DriveType -eq 3 } |
+      Sort-Object DeviceID |
+      ForEach-Object {
+        $size = if ($_.Size) { [int64]$_.Size } else { $null }
+        $free = if ($_.FreeSpace) { [int64]$_.FreeSpace } else { $null }
+        $used = if ($null -ne $size -and $null -ne $free) { [Math]::Max($size - $free, 0) } else { $null }
+        $percentFree = if ($null -ne $size -and $size -gt 0 -and $null -ne $free) {
+          [Math]::Round(($free / $size) * 100, 2)
+        } else {
+          $null
+        }
+
+        [ordered]@{
+          name = [string]$_.DeviceID
+          volumeName = if ($_.VolumeName) { [string]$_.VolumeName } else { $null }
+          fileSystem = if ($_.FileSystem) { [string]$_.FileSystem } else { $null }
+          driveType = Get-DriveTypeName -DriveType ([int]$_.DriveType)
+          totalBytes = $size
+          freeBytes = $free
+          usedBytes = $used
+          percentFree = $percentFree
+        }
+      }
+  )
+
+  $adapters = @(
+    Get-CimInstance Win32_NetworkAdapterConfiguration -Filter "IPEnabled = TRUE" |
+      Sort-Object Description |
+      ForEach-Object {
+        $ipv4 = @()
+        $ipv6 = @()
+        foreach ($ip in @($_.IPAddress)) {
+          if ([string]::IsNullOrWhiteSpace($ip)) {
+            continue
+          }
+
+          if ($ip.Contains(":")) {
+            $ipv6 += [string]$ip
+          } else {
+            $ipv4 += [string]$ip
+          }
+        }
+
+        [ordered]@{
+          name = if ($_.Description) { [string]$_.Description } else { [string]$_.Caption }
+          description = if ($_.Caption) { [string]$_.Caption } else { [string]$_.Description }
+          macAddress = if ($_.MACAddress) { [string]$_.MACAddress } else { $null }
+          ipv4 = @($ipv4 | Sort-Object -Unique)
+          ipv6 = @($ipv6 | Sort-Object -Unique)
+          gateways = @(@($_.DefaultIPGateway) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+          dnsServers = @(@($_.DNSServerSearchOrder) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | Sort-Object -Unique)
+          dhcpEnabled = if ($null -ne $_.DHCPEnabled) { [bool]$_.DHCPEnabled } else { $null }
+        }
+      }
+  )
+
+  $primaryIpv4 = $null
+  foreach ($adapter in $adapters) {
+    if ($adapter.ipv4.Count -gt 0) {
+      $primaryIpv4 = [string]$adapter.ipv4[0]
+      break
+    }
+  }
+
+  return [ordered]@{
+    cpu = [ordered]@{
+      name = $cpuName
+      logicalCores = $logicalCores
+      loadPercent = $loadPercent
+      maxClockMHz = $maxClockMHz
+    }
+    memory = [ordered]@{
+      totalBytes = $totalBytes
+      freeBytes = $freeBytes
+      usedBytes = $usedBytes
+      percentUsed = $percentUsed
+    }
+    disks = $disks
+    network = [ordered]@{
+      adapterCount = @($adapters).Count
+      ipv4Count = @($adapters | ForEach-Object { $_.ipv4 } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+      ipv6Count = @($adapters | ForEach-Object { $_.ipv6 } | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }).Count
+      primaryIpv4 = $primaryIpv4
+      adapters = $adapters
+    }
+  }
 }
 
 function Convert-ServiceState {
@@ -937,6 +1106,7 @@ try {
   $bootTime = $os.LastBootUpTime
   $uptimeSpan = (Get-Date) - $bootTime
   $uptimeText = "{0}d {1}h {2}m" -f [Math]::Floor($uptimeSpan.TotalDays), $uptimeSpan.Hours, $uptimeSpan.Minutes
+  $resources = Get-HostResourceSnapshot -OperatingSystem $os
 
   $dockerProcesses = Get-ProcessNames -Names @("Docker Desktop", "com.docker.backend", "docker-agent", "docker-sandbox")
   $dockerServices = Convert-ServiceState -Names @("com.docker.service")
@@ -1124,7 +1294,9 @@ try {
 
   $plexComponent = New-Component -Name "plex" -Status $plexStatus -Details (($plexDetailsParts -join ". ") + ".")
 
-  $systemComponent = New-Component -Name "system" -Status "healthy" -Details "Windows host up for $uptimeText."
+  $cpuLoadText = if ($null -ne $resources.cpu.loadPercent) { "$([Math]::Round([double]$resources.cpu.loadPercent, 1))%" } else { "unknown" }
+  $memoryUsedText = "$([Math]::Round([double]$resources.memory.percentUsed, 1))%"
+  $systemComponent = New-Component -Name "system" -Status "healthy" -Details "Windows host up for $uptimeText. CPU load $cpuLoadText. Memory $memoryUsedText used."
 
   $components = @(
     $systemComponent
@@ -1147,6 +1319,7 @@ try {
       lastBootUpTime = $bootTime.ToString("o")
       uptime = $uptimeText
     }
+    resources = $resources
     components = $components
     docker = [ordered]@{
       available = ($null -ne $dockerCommand)
@@ -1197,6 +1370,18 @@ try {
     -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
     -Outputs $outputs
 
+  Append-RefreshHistory -Path $snapshotHistoryPath -Entry ([ordered]@{
+      checkedAt = Get-IsoNow
+      startedAt = $refreshStartedAt
+      completedAt = $completedAt
+      runState = "completed"
+      ok = $true
+      durationSeconds = $durationSeconds
+      warnings = @($refreshWarnings)
+      errors = @($refreshErrors)
+      outputs = $outputs
+    })
+
   Write-Host "Wrote host status to $hostStatusPath"
   if (Test-Path $plexIndexPath) {
     Write-Host "Wrote Plex library index to $plexIndexPath"
@@ -1223,6 +1408,22 @@ try {
         plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
         plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
       })
+
+  Append-RefreshHistory -Path $snapshotHistoryPath -Entry ([ordered]@{
+      checkedAt = Get-IsoNow
+      startedAt = $refreshStartedAt
+      completedAt = $completedAt
+      runState = "failed"
+      ok = $false
+      durationSeconds = $durationSeconds
+      warnings = @($refreshWarnings)
+      errors = @($refreshErrors)
+      outputs = [ordered]@{
+        windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+        plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+        plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+      }
+    })
 
   throw
 } finally {

@@ -100,6 +100,57 @@ export type DockerStorageSummary = {
   reclaimable?: string | null;
 };
 
+export type HostCpuStatus = {
+  name: string;
+  logicalCores: number;
+  loadPercent?: number | null;
+  maxClockMHz?: number | null;
+};
+
+export type HostMemoryStatus = {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  percentUsed: number;
+};
+
+export type HostDiskStatus = {
+  name: string;
+  volumeName?: string | null;
+  fileSystem?: string | null;
+  driveType?: string | null;
+  totalBytes?: number | null;
+  freeBytes?: number | null;
+  usedBytes?: number | null;
+  percentFree?: number | null;
+};
+
+export type HostNetworkAdapterStatus = {
+  name: string;
+  description?: string | null;
+  macAddress?: string | null;
+  ipv4: string[];
+  ipv6: string[];
+  gateways?: string[];
+  dnsServers?: string[];
+  dhcpEnabled?: boolean | null;
+};
+
+export type HostNetworkStatus = {
+  adapterCount: number;
+  ipv4Count: number;
+  ipv6Count: number;
+  primaryIpv4?: string | null;
+  adapters: HostNetworkAdapterStatus[];
+};
+
+export type HostResources = {
+  cpu: HostCpuStatus;
+  memory: HostMemoryStatus;
+  disks: HostDiskStatus[];
+  network: HostNetworkStatus;
+};
+
 export type DockerStatus = {
   available: boolean;
   cliVersion?: string | null;
@@ -137,6 +188,7 @@ export type WindowsHostStatus = {
     lastBootUpTime: string;
     uptime: string;
   };
+  resources?: HostResources;
   components: HostComponent[];
   docker?: DockerStatus;
   plex?: PlexStatus;
@@ -311,6 +363,107 @@ function assertDockerStorageSummary(value: unknown): asserts value is DockerStor
   }
 }
 
+function assertHostCpuStatus(value: unknown): asserts value is HostCpuStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host CPU status must be an object");
+  }
+
+  const candidate = value as Partial<HostCpuStatus>;
+  if (typeof candidate.name !== "string" || typeof candidate.logicalCores !== "number") {
+    throw new Error("Host CPU status is missing required fields");
+  }
+}
+
+function assertHostMemoryStatus(value: unknown): asserts value is HostMemoryStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host memory status must be an object");
+  }
+
+  const candidate = value as Partial<HostMemoryStatus>;
+  if (
+    typeof candidate.totalBytes !== "number" ||
+    typeof candidate.freeBytes !== "number" ||
+    typeof candidate.usedBytes !== "number" ||
+    typeof candidate.percentUsed !== "number"
+  ) {
+    throw new Error("Host memory status is missing required fields");
+  }
+}
+
+function assertHostDiskStatus(value: unknown): asserts value is HostDiskStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host disk entries must be objects");
+  }
+
+  const candidate = value as Partial<HostDiskStatus>;
+  if (typeof candidate.name !== "string") {
+    throw new Error("Host disk entries are missing required fields");
+  }
+}
+
+function assertHostNetworkAdapterStatus(value: unknown): asserts value is HostNetworkAdapterStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host network adapter entries must be objects");
+  }
+
+  const candidate = value as Partial<HostNetworkAdapterStatus>;
+  if (
+    typeof candidate.name !== "string" ||
+    !Array.isArray(candidate.ipv4) ||
+    !Array.isArray(candidate.ipv6)
+  ) {
+    throw new Error("Host network adapter entries are missing required fields");
+  }
+
+  if (candidate.gateways !== undefined && !Array.isArray(candidate.gateways)) {
+    throw new Error("Host network adapter gateways must be an array when present");
+  }
+
+  if (candidate.dnsServers !== undefined && !Array.isArray(candidate.dnsServers)) {
+    throw new Error("Host network adapter DNS servers must be an array when present");
+  }
+}
+
+function assertHostNetworkStatus(value: unknown): asserts value is HostNetworkStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host network status must be an object");
+  }
+
+  const candidate = value as Partial<HostNetworkStatus>;
+  if (
+    typeof candidate.adapterCount !== "number" ||
+    typeof candidate.ipv4Count !== "number" ||
+    typeof candidate.ipv6Count !== "number" ||
+    !Array.isArray(candidate.adapters)
+  ) {
+    throw new Error("Host network status is missing required fields");
+  }
+
+  for (const adapter of candidate.adapters) {
+    assertHostNetworkAdapterStatus(adapter);
+  }
+}
+
+function assertHostResources(value: unknown): asserts value is HostResources {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host resources must be an object");
+  }
+
+  const candidate = value as Partial<HostResources>;
+  assertHostCpuStatus(candidate.cpu);
+  assertHostMemoryStatus(candidate.memory);
+
+  if (!Array.isArray(candidate.disks)) {
+    throw new Error("Host disks must be an array");
+  }
+
+  for (const disk of candidate.disks) {
+    assertHostDiskStatus(disk);
+  }
+
+  assertHostNetworkStatus(candidate.network);
+}
+
 function assertDockerStatus(value: unknown): asserts value is DockerStatus {
   if (!value || typeof value !== "object") {
     throw new Error("Docker status must be an object");
@@ -390,6 +543,10 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
     assertComponent(component);
   }
 
+  if (candidate.resources !== undefined) {
+    assertHostResources(candidate.resources);
+  }
+
   if (candidate.docker !== undefined) {
     assertDockerStatus(candidate.docker);
   }
@@ -414,6 +571,40 @@ function toLocalDateDisplay(value: string | null | undefined) {
   }
 
   return value;
+}
+
+function formatByteSize(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "unknown";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let size = value;
+  let unitIndex = 0;
+
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = size >= 100 || unitIndex === 0 ? 0 : size >= 10 ? 1 : 2;
+  return `${size.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "unknown";
+  }
+
+  return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function getHostResources(status: WindowsHostStatus) {
+  if (!status.resources) {
+    throw new Error("Windows host status does not include host resource details");
+  }
+
+  return status.resources;
 }
 
 function findDockerContainerMatch(containers: DockerContainerStatus[], query: string) {
@@ -571,8 +762,37 @@ export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilt
     `Generated: ${status.generatedAt}`,
     `Summary: ${status.summary}`,
     "",
-    "Components:"
   ];
+
+  if (status.resources) {
+    lines.push(
+      `Resources: CPU ${status.resources.cpu.name} | load ${formatPercent(status.resources.cpu.loadPercent ?? null)} | RAM ${formatByteSize(status.resources.memory.usedBytes)} used of ${formatByteSize(status.resources.memory.totalBytes)} (${formatPercent(status.resources.memory.percentUsed)})`
+    );
+
+    const topDisk = [...status.resources.disks]
+      .filter((disk) => disk.totalBytes !== undefined && disk.totalBytes !== null && disk.freeBytes !== undefined && disk.freeBytes !== null)
+      .sort((left, right) => (left.percentFree ?? 100) - (right.percentFree ?? 100))[0];
+
+    if (topDisk) {
+      lines.push(
+        `Storage: ${topDisk.name}${topDisk.volumeName ? ` (${topDisk.volumeName})` : ""} | free ${formatByteSize(topDisk.freeBytes)} of ${formatByteSize(topDisk.totalBytes)} (${formatPercent(topDisk.percentFree)})`
+      );
+    }
+
+    if (status.resources.network.primaryIpv4) {
+      lines.push(
+        `Network: ${status.resources.network.adapterCount} adapters | primary IPv4 ${status.resources.network.primaryIpv4}`
+      );
+    } else {
+      lines.push(`Network: ${status.resources.network.adapterCount} adapters`);
+    }
+
+    lines.push("");
+  }
+
+  lines.push(
+    "Components:"
+  );
 
   if (components.length === 0) {
     lines.push(`- No components matched "${componentFilter}".`);
@@ -582,6 +802,184 @@ export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilt
   for (const component of components) {
     lines.push(`- ${component.name} | ${component.status} | last checked ${component.lastChecked}`);
     lines.push(`  ${component.details}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function formatHostResources(status: WindowsHostStatus) {
+  const resources = getHostResources(status);
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    "Windows host resources:",
+    "",
+    `CPU: ${resources.cpu.name}`,
+    `Logical cores: ${resources.cpu.logicalCores}`,
+    `Load: ${formatPercent(resources.cpu.loadPercent ?? null)}`
+  ];
+
+  if (resources.cpu.maxClockMHz !== undefined && resources.cpu.maxClockMHz !== null) {
+    lines.push(`Max clock: ${resources.cpu.maxClockMHz} MHz`);
+  }
+
+  lines.push(
+    `Memory: ${formatByteSize(resources.memory.usedBytes)} used of ${formatByteSize(resources.memory.totalBytes)} (${formatPercent(resources.memory.percentUsed)})`
+  );
+  lines.push(`Memory free: ${formatByteSize(resources.memory.freeBytes)}`);
+  lines.push(`Disks: ${resources.disks.length}`);
+  lines.push(
+    `Network: ${resources.network.adapterCount} adapters | ${resources.network.ipv4Count} IPv4 addresses | ${resources.network.ipv6Count} IPv6 addresses`
+  );
+
+  if (resources.network.primaryIpv4) {
+    lines.push(`Primary IPv4: ${resources.network.primaryIpv4}`);
+  }
+
+  const lowSpaceDisks = resources.disks
+    .filter((disk) => disk.percentFree !== undefined && disk.percentFree !== null)
+    .sort((left, right) => (left.percentFree ?? 100) - (right.percentFree ?? 100))
+    .slice(0, 3);
+
+  if (lowSpaceDisks.length > 0) {
+    lines.push("");
+    lines.push("Lowest free-space disks:");
+    for (const disk of lowSpaceDisks) {
+      lines.push(
+        `- ${disk.name}${disk.volumeName ? ` (${disk.volumeName})` : ""} | free ${formatByteSize(disk.freeBytes)} of ${formatByteSize(disk.totalBytes)} (${formatPercent(disk.percentFree)})`
+      );
+    }
+  }
+
+  const connectedAdapters = resources.network.adapters.filter((adapter) => adapter.ipv4.length > 0 || adapter.ipv6.length > 0).slice(0, 3);
+  if (connectedAdapters.length > 0) {
+    lines.push("");
+    lines.push("Connected adapters:");
+    for (const adapter of connectedAdapters) {
+      const addresses = [...adapter.ipv4, ...adapter.ipv6].slice(0, 4).join(", ");
+      lines.push(`- ${adapter.name} | ${addresses || "no addresses recorded"}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatHostDisks(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    limit?: number;
+  }
+) {
+  const resources = getHostResources(status);
+  const name = normalize(options?.name);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+  const disks = resources.disks
+    .filter((disk) => {
+      if (!name) {
+        return true;
+      }
+
+      return (
+        disk.name.toLowerCase().includes(name) ||
+        (disk.volumeName?.toLowerCase().includes(name) ?? false) ||
+        (disk.fileSystem?.toLowerCase().includes(name) ?? false)
+      );
+    })
+    .sort((left, right) => (left.percentFree ?? 100) - (right.percentFree ?? 100) || left.name.localeCompare(right.name))
+    .slice(0, limit);
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    options?.name ? `Host disks (${options.name}):` : "Host disks:",
+    ""
+  ];
+
+  if (disks.length === 0) {
+    lines.push("- No host disks matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const disk of disks) {
+    const flags = [disk.driveType, disk.fileSystem].filter(Boolean).join(" | ");
+    lines.push(
+      `- ${disk.name}${disk.volumeName ? ` (${disk.volumeName})` : ""}${flags ? ` | ${flags}` : ""}`
+    );
+    lines.push(
+      `  Used ${formatByteSize(disk.usedBytes)} of ${formatByteSize(disk.totalBytes)} | free ${formatByteSize(disk.freeBytes)} (${formatPercent(disk.percentFree)})`
+    );
+  }
+
+  return lines.join("\n");
+}
+
+export function formatHostNetworkSummary(
+  status: WindowsHostStatus,
+  options?: {
+    query?: string;
+    limit?: number;
+  }
+) {
+  const resources = getHostResources(status);
+  const query = normalize(options?.query);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 50);
+  const adapters = resources.network.adapters
+    .filter((adapter) => {
+      if (!query) {
+        return true;
+      }
+
+      return (
+        adapter.name.toLowerCase().includes(query) ||
+        (adapter.description?.toLowerCase().includes(query) ?? false) ||
+        (adapter.macAddress?.toLowerCase().includes(query) ?? false) ||
+        adapter.ipv4.some((value) => value.toLowerCase().includes(query)) ||
+        adapter.ipv6.some((value) => value.toLowerCase().includes(query)) ||
+        (adapter.gateways?.some((value) => value.toLowerCase().includes(query)) ?? false) ||
+        (adapter.dnsServers?.some((value) => value.toLowerCase().includes(query)) ?? false)
+      );
+    })
+    .slice(0, limit);
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    query ? `Host network summary (${options?.query}):` : "Host network summary:",
+    "",
+    `Adapters: ${resources.network.adapterCount}`,
+    `IPv4 addresses: ${resources.network.ipv4Count}`,
+    `IPv6 addresses: ${resources.network.ipv6Count}`
+  ];
+
+  if (resources.network.primaryIpv4) {
+    lines.push(`Primary IPv4: ${resources.network.primaryIpv4}`);
+  }
+
+  lines.push("");
+  lines.push("Adapters:");
+
+  if (adapters.length === 0) {
+    lines.push("- No network adapters matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const adapter of adapters) {
+    lines.push(`- ${adapter.name}`);
+    if (adapter.description && adapter.description !== adapter.name) {
+      lines.push(`  Description: ${adapter.description}`);
+    }
+    if (adapter.macAddress) {
+      lines.push(`  MAC: ${adapter.macAddress}`);
+    }
+    lines.push(`  IPv4: ${adapter.ipv4.length > 0 ? adapter.ipv4.join(", ") : "none"}`);
+    lines.push(`  IPv6: ${adapter.ipv6.length > 0 ? adapter.ipv6.join(", ") : "none"}`);
+    if (adapter.gateways && adapter.gateways.length > 0) {
+      lines.push(`  Gateways: ${adapter.gateways.join(", ")}`);
+    }
+    if (adapter.dnsServers && adapter.dnsServers.length > 0) {
+      lines.push(`  DNS: ${adapter.dnsServers.join(", ")}`);
+    }
+    if (adapter.dhcpEnabled !== undefined && adapter.dhcpEnabled !== null) {
+      lines.push(`  DHCP: ${adapter.dhcpEnabled ? "enabled" : "disabled"}`);
+    }
   }
 
   return lines.join("\n");
@@ -1905,6 +2303,422 @@ export function formatDockerRestartReport(
   }
 
   return lines.join("\n");
+}
+
+type DockerExposureKind = "public" | "local-only" | "host-ip" | "internal";
+
+type DockerExposureRecord = {
+  container: DockerContainerStatus;
+  exposure: DockerExposureKind;
+  bindings: string[];
+};
+
+function getDockerExposure(container: DockerContainerStatus): DockerExposureRecord | undefined {
+  const raw = container.ports?.trim();
+  if (!raw) {
+    return undefined;
+  }
+
+  const bindings = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+
+  if (bindings.length === 0) {
+    return undefined;
+  }
+
+  let exposure: DockerExposureKind = "internal";
+  for (const binding of bindings) {
+    if (/0\.0\.0\.0:|\[::\]:|:::/.test(binding)) {
+      exposure = "public";
+      break;
+    }
+
+    if (/127\.0\.0\.1:|localhost:|\[::1\]:/.test(binding)) {
+      exposure = exposure === "internal" ? "local-only" : exposure;
+      continue;
+    }
+
+    if (binding.includes("->")) {
+      exposure = exposure === "internal" ? "host-ip" : exposure;
+    }
+  }
+
+  return {
+    container,
+    exposure,
+    bindings
+  };
+}
+
+export function formatDockerExposureReport(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    project?: string;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const project = normalize(options?.project);
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 50);
+  const exposures = docker.containers
+    .filter((container) => !name || container.name.toLowerCase().includes(name) || container.image.toLowerCase().includes(name))
+    .filter((container) => !project || (container.composeProject?.toLowerCase() || "") === project)
+    .map((container) => getDockerExposure(container))
+    .filter((record): record is DockerExposureRecord => Boolean(record))
+    .slice(0, limit);
+
+  const publicBindings = exposures.filter((record) => record.exposure === "public");
+  const localBindings = exposures.filter((record) => record.exposure === "local-only");
+  const hostIpBindings = exposures.filter((record) => record.exposure === "host-ip");
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.project ? `project=${options.project}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Docker exposure report (${filters}):` : "Docker exposure report:",
+    "",
+    `Containers with published ports: ${exposures.length}`,
+    `Public bindings: ${publicBindings.length}`,
+    `Loopback-only bindings: ${localBindings.length}`,
+    `Host-IP bindings: ${hostIpBindings.length}`,
+    ""
+  ];
+
+  if (exposures.length === 0) {
+    lines.push("- No Docker containers with published ports were found.");
+    return lines.join("\n");
+  }
+
+  const sections: Array<{ title: string; records: DockerExposureRecord[] }> = [
+    { title: "Public bindings", records: publicBindings },
+    { title: "Host-IP bindings", records: hostIpBindings },
+    { title: "Loopback-only bindings", records: localBindings }
+  ];
+
+  for (const section of sections) {
+    lines.push(`${section.title}:`);
+    if (section.records.length === 0) {
+      lines.push("- None.");
+    } else {
+      for (const record of section.records) {
+        const container = record.container;
+        lines.push(`- ${container.name} | ${container.image}`);
+        lines.push(`  Ports: ${record.bindings.join(", ")}`);
+        if (container.composeProject || container.composeService) {
+          lines.push(
+            `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+          );
+        }
+        if (container.networks && container.networks.length > 0) {
+          lines.push(`  Networks: ${container.networks.join(", ")}`);
+        }
+      }
+    }
+    lines.push("");
+  }
+
+  lines.push("Guidance:");
+  if (publicBindings.length > 0) {
+    lines.push("- Review public bindings carefully before exposing this host outside your tailnet.");
+  } else {
+    lines.push("- No public 0.0.0.0 or IPv6-any bindings were detected in the latest snapshot.");
+  }
+
+  if (localBindings.length > 0) {
+    lines.push("- Loopback-only bindings are good candidates for private reverse-proxy patterns like Caddy on 127.0.0.1.");
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+export function formatDockerTriageReport(
+  status: WindowsHostStatus,
+  options?: {
+    project?: string;
+    sinceHours?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const project = normalize(options?.project);
+  const sinceHours = Math.min(Math.max(options?.sinceHours ?? 24 * 7, 1), 24 * 180);
+  const scopedContainers = docker.containers.filter(
+    (container) => !project || (container.composeProject?.toLowerCase() || "") === project
+  );
+  const problemContainers = getDockerProblemContainers(scopedContainers);
+  const restartHotspots = scopedContainers
+    .filter((container) => (container.restartCount ?? 0) > 0)
+    .sort((left, right) => (right.restartCount ?? 0) - (left.restartCount ?? 0))
+    .slice(0, 5);
+  const resourceHotspots = scopedContainers
+    .filter((container) => container.resourceUsage)
+    .sort(
+      (left, right) =>
+        (right.resourceUsage?.memoryPercent ?? -1) - (left.resourceUsage?.memoryPercent ?? -1) ||
+        (right.resourceUsage?.cpuPercent ?? -1) - (left.resourceUsage?.cpuPercent ?? -1)
+    )
+    .slice(0, 5);
+  const exposures = scopedContainers
+    .map((container) => getDockerExposure(container))
+    .filter((record): record is DockerExposureRecord => Boolean(record));
+  const publicExposures = exposures.filter((record) => record.exposure === "public");
+  const recentCutoff = Date.now() - sinceHours * 60 * 60 * 1000;
+  const recentFailures = scopedContainers
+    .map((container) => ({ container, latest: getDockerLatestActivityTimestamp(container) }))
+    .filter(({ container, latest }) => {
+      const failed =
+        container.state.toLowerCase() === "restarting" ||
+        (container.state.toLowerCase() === "exited" && (container.exitCode ?? 0) !== 0);
+      return failed && (Number.isNaN(latest) || latest >= recentCutoff);
+    })
+    .sort((left, right) => right.latest - left.latest)
+    .slice(0, 5);
+  const reclaimableStorage = docker.storage.filter(
+    (entry) => entry.reclaimable && entry.reclaimable !== "0B" && entry.reclaimable !== "0B (0%)"
+  );
+
+  const filters = [options?.project ? `project=${options.project}` : "", `sinceHours=${sinceHours}`]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker triage report (${filters}):`,
+    "",
+    `Scope: ${project ? options?.project : "all Docker projects and containers"}`,
+    `Containers: ${scopedContainers.length}`,
+    `Problem containers: ${problemContainers.length}`,
+    `Publicly exposed containers: ${publicExposures.length}`,
+    `Containers with restart history: ${restartHotspots.length}`,
+    ""
+  ];
+
+  lines.push("Priority findings:");
+  if (
+    problemContainers.length === 0 &&
+    publicExposures.length === 0 &&
+    restartHotspots.length === 0 &&
+    recentFailures.length === 0
+  ) {
+    lines.push("- No urgent Docker problems were detected in the latest snapshot.");
+  } else {
+    if (problemContainers.length > 0) {
+      lines.push(`- ${problemContainers.length} containers are unhealthy, restarting, dead, or exited non-zero.`);
+    }
+    if (publicExposures.length > 0) {
+      lines.push(`- ${publicExposures.length} containers publish ports on 0.0.0.0 or IPv6-any bindings.`);
+    }
+    if (restartHotspots.length > 0) {
+      lines.push(`- ${restartHotspots.length} containers show restart history worth reviewing.`);
+    }
+    if (recentFailures.length > 0) {
+      lines.push(`- ${recentFailures.length} containers failed recently inside the last ${sinceHours} hours.`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Top resource consumers:");
+  if (resourceHotspots.length === 0) {
+    lines.push("- No running containers with resource usage data were found.");
+  } else {
+    for (const container of resourceHotspots) {
+      const usageBits = [
+        container.resourceUsage?.cpuPercent !== undefined && container.resourceUsage?.cpuPercent !== null
+          ? `CPU ${container.resourceUsage.cpuPercent.toFixed(2)}%`
+          : "",
+        container.resourceUsage?.memoryUsage ? `Mem ${container.resourceUsage.memoryUsage}` : "",
+        container.resourceUsage?.memoryPercent !== undefined && container.resourceUsage?.memoryPercent !== null
+          ? `Mem% ${container.resourceUsage.memoryPercent.toFixed(2)}%`
+          : ""
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      lines.push(`- ${container.name} | ${container.image}${usageBits ? ` | ${usageBits}` : ""}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Restart and failure hotspots:");
+  if (restartHotspots.length === 0 && recentFailures.length === 0) {
+    lines.push("- No restart hotspots or recent failures were detected.");
+  } else {
+    for (const container of restartHotspots) {
+      lines.push(`- ${container.name} | restartCount ${container.restartCount ?? 0} | ${container.status}`);
+    }
+
+    for (const { container, latest } of recentFailures) {
+      const latestText = Number.isFinite(latest) ? new Date(latest).toISOString() : "unknown";
+      lines.push(`- ${container.name} | recent failure | latest ${latestText} | ${container.status}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Exposure:");
+  if (publicExposures.length === 0) {
+    lines.push("- No public Docker port bindings were detected in this scope.");
+  } else {
+    for (const record of publicExposures) {
+      lines.push(`- ${record.container.name} | ${record.bindings.join(", ")}`);
+    }
+  }
+
+  if (reclaimableStorage.length > 0) {
+    lines.push("");
+    lines.push("Reclaimable storage:");
+    for (const entry of reclaimableStorage) {
+      lines.push(`- ${entry.type} | reclaimable ${entry.reclaimable} | total ${entry.size || "unknown"}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Recommended next commands:");
+  if (problemContainers.length > 0) {
+    lines.push("- get_docker_issues");
+  }
+  if (restartHotspots.length > 0 || recentFailures.length > 0) {
+    lines.push(`- get_docker_restart_report sinceHours=${sinceHours}`);
+  }
+  if (resourceHotspots.length > 0) {
+    lines.push("- get_docker_resource_usage");
+  }
+  if (publicExposures.length > 0) {
+    lines.push("- get_docker_exposure_report");
+  }
+  if (reclaimableStorage.length > 0) {
+    lines.push("- get_docker_cleanup_candidates");
+  }
+  if (problemContainers.length === 0 && restartHotspots.length === 0 && recentFailures.length === 0 && publicExposures.length === 0) {
+    lines.push("- get_docker_compose_health");
+  }
+
+  return lines.join("\n");
+}
+
+export function formatHostFind(
+  status: WindowsHostStatus,
+  options: {
+    query: string;
+    domain?: "auto" | "component" | "resource" | "disk" | "network";
+    limit?: number;
+  }
+) {
+  const resources = getHostResources(status);
+  const query = normalize(options.query);
+  if (!query) {
+    return `Generated: ${status.generatedAt}\nHost finder:\n\n- A non-empty host query is required.`;
+  }
+
+  const domain = options.domain ?? "auto";
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+  const queryLooksLikeResource = /cpu|memory|ram|resource|load|uptime/.test(query);
+
+  const components =
+    domain === "auto" || domain === "component"
+      ? status.components
+          .filter(
+            (component) =>
+              component.name.toLowerCase().includes(query) ||
+              component.status.toLowerCase().includes(query) ||
+              component.details.toLowerCase().includes(query)
+          )
+          .slice(0, limit)
+      : [];
+
+  const diskMatches =
+    domain === "auto" || domain === "disk"
+      ? resources.disks
+          .filter(
+            (disk) =>
+              disk.name.toLowerCase().includes(query) ||
+              (disk.volumeName?.toLowerCase().includes(query) ?? false) ||
+              (disk.fileSystem?.toLowerCase().includes(query) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+
+  const networkMatches =
+    domain === "auto" || domain === "network"
+      ? resources.network.adapters
+          .filter(
+            (adapter) =>
+              adapter.name.toLowerCase().includes(query) ||
+              (adapter.description?.toLowerCase().includes(query) ?? false) ||
+              adapter.ipv4.some((value) => value.toLowerCase().includes(query)) ||
+              adapter.ipv6.some((value) => value.toLowerCase().includes(query)) ||
+              (adapter.gateways?.some((value) => value.toLowerCase().includes(query)) ?? false) ||
+              (adapter.dnsServers?.some((value) => value.toLowerCase().includes(query)) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+
+  const includeResourceSummary = domain === "resource" || queryLooksLikeResource;
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Host finder for "${options.query}"${domain !== "auto" ? ` (${domain})` : ""}:`,
+    ""
+  ];
+
+  if (includeResourceSummary) {
+    lines.push("Resources:");
+    lines.push(`- CPU ${resources.cpu.name} | load ${formatPercent(resources.cpu.loadPercent ?? null)} | logical cores ${resources.cpu.logicalCores}`);
+    lines.push(
+      `- Memory ${formatByteSize(resources.memory.usedBytes)} used of ${formatByteSize(resources.memory.totalBytes)} (${formatPercent(resources.memory.percentUsed)})`
+    );
+    lines.push(`- Network adapters ${resources.network.adapterCount} | primary IPv4 ${resources.network.primaryIpv4 || "unknown"}`);
+    lines.push("");
+  }
+
+  if (components.length > 0) {
+    lines.push("Components:");
+    for (const component of components) {
+      lines.push(`- ${component.name} | ${component.status}`);
+      lines.push(`  ${component.details}`);
+    }
+    lines.push("");
+  }
+
+  if (diskMatches.length > 0) {
+    lines.push("Disks:");
+    for (const disk of diskMatches) {
+      lines.push(
+        `- ${disk.name}${disk.volumeName ? ` (${disk.volumeName})` : ""} | free ${formatByteSize(disk.freeBytes)} of ${formatByteSize(disk.totalBytes)} (${formatPercent(disk.percentFree)})`
+      );
+    }
+    lines.push("");
+  }
+
+  if (networkMatches.length > 0) {
+    lines.push("Network adapters:");
+    for (const adapter of networkMatches) {
+      lines.push(`- ${adapter.name}`);
+      lines.push(`  IPv4: ${adapter.ipv4.length > 0 ? adapter.ipv4.join(", ") : "none"}`);
+      if (adapter.dnsServers && adapter.dnsServers.length > 0) {
+        lines.push(`  DNS: ${adapter.dnsServers.join(", ")}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (lines.length <= 3) {
+    lines.push("- No host components, resources, disks, or network adapters matched that query.");
+  }
+
+  return lines.join("\n").trimEnd();
 }
 
 export function formatPlexStatus(status: WindowsHostStatus) {

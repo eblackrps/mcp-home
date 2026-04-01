@@ -66,6 +66,14 @@ async function main() {
       name: "get_snapshot_status",
       arguments: {}
     });
+    const snapshotHistory = await client.callTool({
+      name: "get_snapshot_history",
+      arguments: { limit: 3 }
+    });
+    const snapshotRecommendations = await client.callTool({
+      name: "get_snapshot_recommendations",
+      arguments: {}
+    });
     const dashboard = await client.callTool({
       name: "get_operations_dashboard",
       arguments: {}
@@ -78,15 +86,41 @@ async function main() {
     const plexText = getFirstText(plex.content);
     const dockerText = getFirstText(docker.content);
     const snapshotText = getFirstText(snapshot.content);
+    const snapshotHistoryText = getFirstText(snapshotHistory.content);
+    const snapshotRecommendationsText = getFirstText(snapshotRecommendations.content);
     const dashboardText = getFirstText(dashboard.content);
     const homeText = getFirstText(home.content);
     let portText = "";
+    let hostResourcesText = "";
+    let dockerTriageText = "";
+    let hostFindText = "";
     if (toolNames.includes("get_docker_port_map")) {
       const dockerPorts = await client.callTool({
         name: "get_docker_port_map",
         arguments: { project: "mcphome", limit: 5 }
       });
       portText = getFirstText(dockerPorts.content);
+    }
+    if (toolNames.includes("get_host_resources")) {
+      const hostResources = await client.callTool({
+        name: "get_host_resources",
+        arguments: {}
+      });
+      hostResourcesText = getFirstText(hostResources.content);
+    }
+    if (toolNames.includes("get_docker_triage_report")) {
+      const dockerTriage = await client.callTool({
+        name: "get_docker_triage_report",
+        arguments: { sinceHours: 168 }
+      });
+      dockerTriageText = getFirstText(dockerTriage.content);
+    }
+    if (toolNames.includes("find_host")) {
+      const hostFind = await client.callTool({
+        name: "find_host",
+        arguments: { query: "memory", limit: 3 }
+      });
+      hostFindText = getFirstText(hostFind.content);
     }
 
     if (!plexText.toLowerCase().includes("sopranos")) {
@@ -101,6 +135,14 @@ async function main() {
       throw new Error("get_snapshot_status did not return the expected snapshot summary");
     }
 
+    if (!snapshotHistoryText.includes("Snapshot history")) {
+      throw new Error("get_snapshot_history did not return the expected history summary");
+    }
+
+    if (!snapshotRecommendationsText.includes("Snapshot recommendations")) {
+      throw new Error("get_snapshot_recommendations did not return the expected recommendation summary");
+    }
+
     if (!dashboardText.includes("Snapshot freshness")) {
       throw new Error("get_operations_dashboard did not return the expected dashboard summary");
     }
@@ -113,6 +155,18 @@ async function main() {
       throw new Error("get_docker_port_map did not return the expected port mapping summary");
     }
 
+    if (toolNames.includes("get_host_resources") && !hostResourcesText.includes("Windows host resources")) {
+      throw new Error("get_host_resources did not return the expected host resource summary");
+    }
+
+    if (toolNames.includes("get_docker_triage_report") && !dockerTriageText.includes("Docker triage report")) {
+      throw new Error("get_docker_triage_report did not return the expected triage summary");
+    }
+
+    if (toolNames.includes("find_host") && !hostFindText.toLowerCase().includes("memory")) {
+      throw new Error("find_host did not return the expected host match");
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -122,8 +176,13 @@ async function main() {
           plexPreview: plexText.slice(0, 120),
           dockerPreview: dockerText.slice(0, 120),
           snapshotPreview: snapshotText.slice(0, 120),
+          snapshotHistoryPreview: snapshotHistoryText.slice(0, 120),
+          snapshotRecommendationsPreview: snapshotRecommendationsText.slice(0, 120),
           dashboardPreview: dashboardText.slice(0, 120),
           homePreview: homeText.slice(0, 120),
+          hostResourcesPreview: hostResourcesText.slice(0, 120),
+          hostFindPreview: hostFindText.slice(0, 120),
+          dockerTriagePreview: dockerTriageText.slice(0, 120),
           portPreview: portText.slice(0, 120)
         },
         null,

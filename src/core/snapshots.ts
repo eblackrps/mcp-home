@@ -18,6 +18,14 @@ export type SnapshotSchedulerStatus = {
   intervalMinutes?: number | null;
 };
 
+export type SnapshotOutputSummary = {
+  path?: string | null;
+  exists?: boolean;
+  updatedAt?: string | null;
+  sizeBytes?: number | null;
+  sourceTimestamp?: string | null;
+};
+
 type SnapshotStatusFile = {
   startedAt?: string | null;
   completedAt?: string | null;
@@ -27,6 +35,7 @@ type SnapshotStatusFile = {
   warnings?: string[];
   errors?: string[];
   scheduler?: SnapshotSchedulerStatus;
+  outputs?: Partial<Record<SnapshotFileStatus["key"], SnapshotOutputSummary>>;
 };
 
 export type SnapshotFileStatus = {
@@ -59,8 +68,24 @@ export type SnapshotOverview = {
   overallFreshness: SnapshotFreshness;
 };
 
+export type SnapshotHistoryEntry = {
+  checkedAt?: string | null;
+  startedAt?: string | null;
+  completedAt?: string | null;
+  runState: SnapshotRunState;
+  ok?: boolean | null;
+  durationSeconds?: number | null;
+  warnings: string[];
+  errors: string[];
+  outputs?: Partial<Record<SnapshotFileStatus["key"], SnapshotOutputSummary>>;
+};
+
 const DEFAULT_SNAPSHOT_STATUS_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/snapshot-status.json", import.meta.url))
+);
+
+const DEFAULT_SNAPSHOT_HISTORY_PATH = path.resolve(
+  fileURLToPath(new URL("../../data/local/snapshot-history.json", import.meta.url))
 );
 
 const DEFAULT_THRESHOLDS_MINUTES = {
@@ -74,6 +99,14 @@ let cachedStatusFile:
       path: string;
       mtimeMs: number;
       value: SnapshotStatusFile;
+    }
+  | undefined;
+
+let cachedHistoryFile:
+  | {
+      path: string;
+      mtimeMs: number;
+      value: SnapshotHistoryEntry[];
     }
   | undefined;
 
@@ -211,6 +244,64 @@ async function readSnapshotStatusFile(statusPath = getSnapshotStatusPath()): Pro
   return parsed;
 }
 
+function normalizeHistoryEntry(value: unknown): SnapshotHistoryEntry {
+  if (!value || typeof value !== "object") {
+    throw new Error("Snapshot history entries must be objects");
+  }
+
+  const candidate = value as Partial<SnapshotHistoryEntry>;
+  return {
+    checkedAt: candidate.checkedAt ?? null,
+    startedAt: candidate.startedAt ?? null,
+    completedAt: candidate.completedAt ?? null,
+    runState: toRunState(candidate.runState),
+    ok: candidate.ok ?? null,
+    durationSeconds:
+      typeof candidate.durationSeconds === "number" && Number.isFinite(candidate.durationSeconds)
+        ? candidate.durationSeconds
+        : null,
+    warnings: Array.isArray(candidate.warnings) ? candidate.warnings.filter((item): item is string => typeof item === "string") : [],
+    errors: Array.isArray(candidate.errors) ? candidate.errors.filter((item): item is string => typeof item === "string") : [],
+    outputs: candidate.outputs
+  };
+}
+
+export function getSnapshotHistoryPath() {
+  return process.env.SNAPSHOT_HISTORY_PATH ?? DEFAULT_SNAPSHOT_HISTORY_PATH;
+}
+
+async function readSnapshotHistoryFile(historyPath = getSnapshotHistoryPath()): Promise<SnapshotHistoryEntry[]> {
+  const fullPath = path.resolve(historyPath);
+  const stat = await statIfExists(fullPath);
+  if (!stat) {
+    return [];
+  }
+
+  if (cachedHistoryFile && cachedHistoryFile.path === fullPath && cachedHistoryFile.mtimeMs === stat.mtimeMs) {
+    return cachedHistoryFile.value;
+  }
+
+  const raw = await fs.readFile(fullPath, "utf8");
+  const parsed = JSON.parse(stripBom(raw)) as unknown;
+  let entries: SnapshotHistoryEntry[];
+
+  if (Array.isArray(parsed)) {
+    entries = parsed.map(normalizeHistoryEntry);
+  } else if (parsed && typeof parsed === "object" && Array.isArray((parsed as { entries?: unknown[] }).entries)) {
+    entries = (parsed as { entries: unknown[] }).entries.map(normalizeHistoryEntry);
+  } else {
+    throw new Error("Snapshot history file is not in the expected format");
+  }
+
+  cachedHistoryFile = {
+    path: fullPath,
+    mtimeMs: stat.mtimeMs,
+    value: entries
+  };
+
+  return entries;
+}
+
 async function buildSnapshotFileStatus(
   key: SnapshotFileStatus["key"],
   label: string,
@@ -303,6 +394,13 @@ export async function readSnapshotOverview(): Promise<SnapshotOverview> {
   };
 }
 
+export async function readSnapshotHistory(limit?: number): Promise<SnapshotHistoryEntry[]> {
+  const history = await readSnapshotHistoryFile();
+  const normalizedLimit = limit ? Math.min(Math.max(limit, 1), 100) : undefined;
+  const sorted = [...history].sort((left, right) => parseTimestamp(right.checkedAt) - parseTimestamp(left.checkedAt));
+  return normalizedLimit ? sorted.slice(0, normalizedLimit) : sorted;
+}
+
 export function formatSnapshotHeadline(overview: SnapshotOverview) {
   const pieces = overview.files.map((file) => {
     const age = formatAgeMinutes(file.ageMinutes);
@@ -310,6 +408,16 @@ export function formatSnapshotHeadline(overview: SnapshotOverview) {
   });
 
   return `Snapshot freshness: ${overview.overallFreshness}. ${pieces.join("; ")}.`;
+}
+
+function summarizeHistoryFailures(entries: SnapshotHistoryEntry[]) {
+  const failedRuns = entries.filter((entry) => entry.runState === "failed" || entry.ok === false);
+  const completedRuns = entries.filter((entry) => entry.runState === "completed" && entry.ok === true);
+  return {
+    total: entries.length,
+    failed: failedRuns.length,
+    completed: completedRuns.length
+  };
 }
 
 export function formatSnapshotStatus(overview: SnapshotOverview) {
@@ -392,6 +500,146 @@ export function formatSnapshotStatus(overview: SnapshotOverview) {
     lines.push("Refresh errors:");
     for (const error of overview.refresh.errors) {
       lines.push(`- ${error}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatSnapshotHistory(entries: SnapshotHistoryEntry[], options?: { limit?: number }) {
+  const limit = Math.min(Math.max(options?.limit ?? entries.length, 1), 100);
+  const selected = entries.slice(0, limit);
+  const summary = summarizeHistoryFailures(selected);
+  const lines = [
+    `Snapshot history: ${selected.length} runs shown.`,
+    `Completed: ${summary.completed} | Failed: ${summary.failed}`,
+    ""
+  ];
+
+  if (selected.length === 0) {
+    lines.push("- No snapshot refresh history has been recorded yet.");
+    return lines.join("\n");
+  }
+
+  for (const entry of selected) {
+    const statusBits = [
+      entry.runState,
+      entry.ok === true ? "ok" : entry.ok === false ? "failed" : "",
+      entry.durationSeconds !== null && entry.durationSeconds !== undefined
+        ? `${entry.durationSeconds.toFixed(1)}s`
+        : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    lines.push(`- ${entry.checkedAt || entry.completedAt || entry.startedAt || "unknown"} | ${statusBits}`);
+
+    if (entry.startedAt || entry.completedAt) {
+      lines.push(`  Started: ${entry.startedAt || "unknown"} | Completed: ${entry.completedAt || "unknown"}`);
+    }
+
+    if (entry.warnings.length > 0) {
+      lines.push(`  Warnings: ${entry.warnings.join(" | ")}`);
+    }
+
+    if (entry.errors.length > 0) {
+      lines.push(`  Errors: ${entry.errors.join(" | ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatSnapshotRecommendations(overview: SnapshotOverview, history: SnapshotHistoryEntry[]) {
+  const lines = [
+    "Snapshot recommendations:",
+    "",
+    formatSnapshotHeadline(overview),
+    ""
+  ];
+
+  const recommendations: string[] = [];
+  const likelyCauses: string[] = [];
+  const recentHistory = history.slice(0, 5);
+  const recentFailures = recentHistory.filter((entry) => entry.runState === "failed" || entry.ok === false);
+  const fileMap = new Map(overview.files.map((file) => [file.key, file]));
+  const hostFile = fileMap.get("windowsHostStatus");
+  const plexIndexFile = fileMap.get("plexLibraryIndex");
+  const plexActivityFile = fileMap.get("plexActivity");
+  const warningText = overview.refresh.warnings.join(" ").toLowerCase();
+  const errorText = overview.refresh.errors.join(" ").toLowerCase();
+
+  if (!overview.scheduler.installed) {
+    recommendations.push('Install the scheduled refresh task with "npm run schedule:host-refresh" so snapshots do not depend on manual refreshes.');
+  } else if (overview.scheduler.lastTaskResult !== null && overview.scheduler.lastTaskResult !== undefined && overview.scheduler.lastTaskResult !== 0) {
+    recommendations.push("The Windows scheduled task is installed but the last task result was non-zero. Inspect Task Scheduler for the latest host refresh run.");
+  }
+
+  if (overview.refresh.runState === "failed" || overview.refresh.ok === false) {
+    recommendations.push('Run "npm run refresh:host" on the Windows host and inspect the reported errors before trusting stale data.');
+  }
+
+  if ((hostFile?.freshness === "stale" || hostFile?.freshness === "missing") && !overview.scheduler.installed) {
+    likelyCauses.push("The Windows host snapshot is stale because there is no automatic refresh task installed.");
+  }
+
+  if ((plexIndexFile?.freshness === "stale" || plexIndexFile?.freshness === "missing") && /python|export script|plex database/.test(warningText + " " + errorText)) {
+    likelyCauses.push("The Plex library index is stale because the local export prerequisites are missing or failing.");
+    recommendations.push("Verify Python 3, the Plex database path, and the Plex export script on the Windows host.");
+  }
+
+  if ((plexActivityFile?.freshness === "stale" || plexActivityFile?.freshness === "missing") && /no plex token/.test(warningText)) {
+    likelyCauses.push("The Plex activity snapshot is stale or incomplete because no local Plex token was found.");
+    recommendations.push("Set a local Plex token so continue-watching, on-deck, and history snapshots can refresh fully.");
+  }
+
+  if ((hostFile?.freshness === "stale" || hostFile?.freshness === "missing") && /docker cli was not available/.test(warningText)) {
+    likelyCauses.push("Docker snapshot data may be stale because the Docker CLI was unavailable during refresh.");
+    recommendations.push("Make sure Docker Desktop is running and the Docker CLI is available in the Windows host environment.");
+  }
+
+  if (overview.overallFreshness === "late") {
+    recommendations.push('Snapshots are late but not fully stale yet. A manual "npm run refresh:host" is worth doing if answers look old.');
+  }
+
+  if (overview.overallFreshness === "fresh") {
+    recommendations.push("Snapshot freshness looks healthy right now. If answers still look wrong, compare the live tool output against the underlying host or Plex source.");
+  }
+
+  if (recentFailures.length >= 2) {
+    likelyCauses.push(`The last ${recentHistory.length} runs include ${recentFailures.length} failures, so this is a repeated refresh problem rather than a one-off miss.`);
+  }
+
+  if (likelyCauses.length > 0) {
+    lines.push("Likely causes:");
+    for (const cause of likelyCauses) {
+      lines.push(`- ${cause}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("Recommended next actions:");
+  if (recommendations.length === 0) {
+    lines.push("- No special action is required right now.");
+  } else {
+    for (const recommendation of recommendations) {
+      lines.push(`- ${recommendation}`);
+    }
+  }
+
+  if (recentHistory.length > 0) {
+    lines.push("");
+    lines.push("Recent run summary:");
+    for (const entry of recentHistory) {
+      const statusBits = [
+        entry.runState,
+        entry.ok === true ? "ok" : entry.ok === false ? "failed" : "",
+        entry.durationSeconds !== null && entry.durationSeconds !== undefined
+          ? `${entry.durationSeconds.toFixed(1)}s`
+          : ""
+      ]
+        .filter(Boolean)
+        .join(" | ");
+      lines.push(`- ${entry.checkedAt || entry.completedAt || entry.startedAt || "unknown"} | ${statusBits}`);
     }
   }
 
