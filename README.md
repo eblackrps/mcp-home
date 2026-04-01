@@ -28,7 +28,7 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 - split tool profiles so remote HTTP can stay narrower while local stdio stays broader
 - OAuth support for ChatGPT and bearer-token support for generic remote clients
 - Docker, Caddy, and Tailscale deployment options
-- audit logging plus smoke and production verification scripts
+- audit logging plus smoke, failure-path, and production verification scripts
 
 ## Tool groups
 
@@ -255,9 +255,21 @@ mcp-home/
 
    - `npm run build`
    - `npm run typecheck:scripts`
+   - `npm run verify:error-paths`
    - `npm run smoke:stdio`
    - `npm run smoke:stdio:public-safe`
    - `npm run smoke:http`
+
+9. Run just the failure-path regression checks when you want to validate corrupted-snapshot handling and invalid HTTP configuration without running the whole smoke bundle:
+
+   ```powershell
+   npm run verify:error-paths
+   ```
+
+   This currently verifies:
+
+   - malformed JSON handling for homelab, file-catalog, Plex library, Plex activity, repo-status, snapshot-status, and Windows host snapshot readers
+   - startup rejection for invalid `PORT` values in the HTTP transport
 
 If you only want local Claude or another local `stdio` client, you can stop here. You do not need Caddy, Tailscale, ChatGPT OAuth, or separate API keys for that local-only path.
 
@@ -557,6 +569,8 @@ The container image now includes a built-in healthcheck against `/health`, and b
 The host refresh path now also records a separate `snapshot-status.json` file, so the MCP server can tell you when the underlying Windows, Docker, and Plex data is old instead of silently answering from stale files.
 
 The HTTP transport now also reports its active tool profile in `/health`, which makes it easier to debug "why does ChatGPT not see this tool?" problems after a deployment.
+
+The verification bundle now includes explicit malformed-snapshot and invalid-`PORT` regression checks, so common broken-config and corrupted-JSON failure modes are exercised before release.
 
 ## Recommended remote path: Caddy + Tailscale Funnel
 

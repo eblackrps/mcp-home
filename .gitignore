@@ -12,3 +12,4 @@ data/local/*
 !data/local/.gitignore
 state/*
 !state/.gitignore
+.claude/
