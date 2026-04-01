@@ -9,6 +9,7 @@ services:
       NOTES_DIR: /app/notes
       HOMELAB_STATUS_PATH: /app/data/homelab-status.json
       WINDOWS_HOST_STATUS_PATH: /app/data/local/windows-host-status.json
+      SNAPSHOT_STATUS_PATH: /app/data/local/snapshot-status.json
       PLEX_LIBRARY_INDEX_PATH: /app/data/local/plex-library-index.json
       MCP_OAUTH_STATE_PATH: /app/state/oauth-state.json
       MCP_AUDIT_LOG_PATH: /app/logs/mcp-audit.log

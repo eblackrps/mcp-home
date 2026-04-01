@@ -18,7 +18,7 @@ if (-not (Test-Path $refreshScriptPath)) {
 
 $startTime = (Get-Date).AddMinutes(1).ToString("HH:mm")
 $escapedScript = $refreshScriptPath.Replace('"', '""')
-$taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File ""$escapedScript"""
+$taskCommand = "powershell.exe -NoLogo -NoProfile -WindowStyle Hidden -ExecutionPolicy Bypass -File ""$escapedScript"""
 
 $arguments = @(
   "/Create"

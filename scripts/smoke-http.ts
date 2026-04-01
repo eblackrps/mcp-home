@@ -1,7 +1,7 @@
 import "dotenv/config";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { CRITICAL_TOOL_NAMES, SERVER_NAME } from "../src/core/server-meta.js";
+import { CRITICAL_TOOL_NAMES, SERVER_NAME, SERVER_VERSION } from "../src/core/server-meta.js";
 
 const authToken = process.env.MCP_AUTH_TOKEN;
 const authMode = process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer";
@@ -108,7 +108,7 @@ async function main() {
         params: {
           protocolVersion: "2025-11-05",
           capabilities: {},
-          clientInfo: { name: "oauth-smoke-test", version: "0.2.13" }
+          clientInfo: { name: "oauth-smoke-test", version: SERVER_VERSION }
         }
       })
     });
@@ -143,7 +143,7 @@ async function main() {
       : undefined
   });
 
-  const client = new Client({ name: "mcp-home-smoke-test", version: "0.2.13" });
+  const client = new Client({ name: "mcp-home-smoke-test", version: SERVER_VERSION });
   await client.connect(transport);
 
   try {
@@ -166,10 +166,20 @@ async function main() {
       name: "get_docker_status",
       arguments: {}
     });
+    const snapshot = await client.callTool({
+      name: "get_snapshot_status",
+      arguments: {}
+    });
+    const dashboard = await client.callTool({
+      name: "get_operations_dashboard",
+      arguments: {}
+    });
 
     const noteText = getFirstText(note.content);
     const plexText = getFirstText(plex.content);
     const dockerText = getFirstText(docker.content);
+    const snapshotText = getFirstText(snapshot.content);
+    const dashboardText = getFirstText(dashboard.content);
 
     if (!noteText.includes("NAS: online")) {
       throw new Error("read_note did not return the expected homelab note");
@@ -183,6 +193,14 @@ async function main() {
       throw new Error("get_docker_status did not return the expected Docker summary");
     }
 
+    if (!snapshotText.includes("Overall freshness")) {
+      throw new Error("get_snapshot_status did not return the expected snapshot summary");
+    }
+
+    if (!dashboardText.includes("Snapshot freshness")) {
+      throw new Error("get_operations_dashboard did not return the expected dashboard summary");
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -192,7 +210,9 @@ async function main() {
           toolNames,
           notePreview: noteText.slice(0, 120),
           plexPreview: plexText.slice(0, 120),
-          dockerPreview: dockerText.slice(0, 120)
+          dockerPreview: dockerText.slice(0, 120),
+          snapshotPreview: snapshotText.slice(0, 120),
+          dashboardPreview: dashboardText.slice(0, 120)
         },
         null,
         2

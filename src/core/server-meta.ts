@@ -1,11 +1,17 @@
 export const SERVER_NAME = "mcp-home";
-export const SERVER_VERSION = "0.2.13";
+export const SERVER_VERSION = "0.3.0";
 
 export const REGISTERED_TOOL_NAMES = [
   "ping",
   "get_time",
+  "list_home_commands",
   "list_docker_commands",
   "list_plex_commands",
+  "get_snapshot_status",
+  "get_operations_dashboard",
+  "find_home",
+  "find_docker",
+  "find_notes",
   "find_plex",
   "get_homelab_status",
   "get_host_status",
@@ -22,6 +28,9 @@ export const REGISTERED_TOOL_NAMES = [
   "get_docker_project_details",
   "list_docker_volumes",
   "get_docker_cleanup_candidates",
+  "get_docker_port_map",
+  "get_docker_mount_report",
+  "get_docker_restart_report",
   "get_plex_status",
   "get_plex_server_activity",
   "get_plex_now_playing",
@@ -51,6 +60,9 @@ export const REGISTERED_TOOL_NAMES = [
 ] as const;
 
 export const CRITICAL_TOOL_NAMES = [
+  "get_snapshot_status",
+  "get_operations_dashboard",
+  "find_home",
   "find_plex",
   "get_docker_status",
   "list_plex_commands",

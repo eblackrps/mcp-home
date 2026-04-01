@@ -5,13 +5,179 @@ $dataDir = Join-Path $repoRoot "data\local"
 $hostStatusPath = Join-Path $dataDir "windows-host-status.json"
 $plexIndexPath = Join-Path $dataDir "plex-library-index.json"
 $plexActivityPath = Join-Path $dataDir "plex-activity.json"
+$snapshotStatusPath = Join-Path $dataDir "snapshot-status.json"
+$refreshLockPath = Join-Path $dataDir "refresh-windows-host.lock"
+$refreshTaskName = if ($env:HOST_REFRESH_TASK_NAME) { $env:HOST_REFRESH_TASK_NAME } else { "MCP Home Host Refresh" }
 $pythonScriptPath = Join-Path $PSScriptRoot "export-plex-library.py"
+$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
 
 New-Item -ItemType Directory -Path $dataDir -Force | Out-Null
 Add-Type -AssemblyName System.Net.Http
 
 function Get-IsoNow {
   return (Get-Date).ToString("o")
+}
+
+function Write-JsonAtomic {
+  param(
+    [string]$Path,
+    [object]$Value,
+    [int]$Depth = 8
+  )
+
+  $directory = Split-Path -Path $Path -Parent
+  New-Item -ItemType Directory -Path $directory -Force | Out-Null
+  $tempPath = Join-Path $directory ([System.IO.Path]::GetRandomFileName() + ".tmp")
+
+  try {
+    $json = $Value | ConvertTo-Json -Depth $Depth
+    [System.IO.File]::WriteAllText($tempPath, $json, $utf8NoBom)
+    Move-Item -Path $tempPath -Destination $Path -Force
+  } finally {
+    if (Test-Path $tempPath) {
+      Remove-Item -Path $tempPath -Force -ErrorAction SilentlyContinue
+    }
+  }
+}
+
+function Get-RefreshOutputSummary {
+  param(
+    [string]$Path,
+    [string]$SourceTimestamp = $null
+  )
+
+  if (-not (Test-Path $Path)) {
+    return [ordered]@{
+      path = $Path
+      exists = $false
+      updatedAt = $null
+      sizeBytes = $null
+      sourceTimestamp = $SourceTimestamp
+    }
+  }
+
+  $item = Get-Item -Path $Path
+  return [ordered]@{
+    path = $Path
+    exists = $true
+    updatedAt = $item.LastWriteTimeUtc.ToString("o")
+    sizeBytes = [int64]$item.Length
+    sourceTimestamp = $SourceTimestamp
+  }
+}
+
+function Get-RefreshSchedulerInfo {
+  param([string]$TaskName)
+
+  try {
+    $task = Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    $taskInfo = Get-ScheduledTaskInfo -TaskName $TaskName -ErrorAction Stop
+    $intervalMinutes = $null
+
+    foreach ($trigger in @($task.Triggers)) {
+      $interval = $trigger.Repetition.Interval
+      if ($interval -is [TimeSpan]) {
+        $intervalMinutes = [int][Math]::Round($interval.TotalMinutes)
+        break
+      }
+
+      if ($interval) {
+        try {
+          $intervalMinutes = [int][Math]::Round(([System.Xml.XmlConvert]::ToTimeSpan([string]$interval)).TotalMinutes)
+          break
+        } catch {
+        }
+      }
+    }
+
+    return [ordered]@{
+      taskName = $TaskName
+      installed = $true
+      state = if ($task.State) { [string]$task.State } else { $null }
+      nextRunTime = if ($taskInfo.NextRunTime -and $taskInfo.NextRunTime -gt [datetime]::MinValue) { $taskInfo.NextRunTime.ToUniversalTime().ToString("o") } else { $null }
+      lastRunTime = if ($taskInfo.LastRunTime -and $taskInfo.LastRunTime -gt [datetime]::MinValue) { $taskInfo.LastRunTime.ToUniversalTime().ToString("o") } else { $null }
+      lastTaskResult = if ($null -ne $taskInfo.LastTaskResult) { [int]$taskInfo.LastTaskResult } else { $null }
+      intervalMinutes = $intervalMinutes
+    }
+  } catch {
+    return [ordered]@{
+      taskName = $TaskName
+      installed = $false
+      state = $null
+      nextRunTime = $null
+      lastRunTime = $null
+      lastTaskResult = $null
+      intervalMinutes = $null
+    }
+  }
+}
+
+function Acquire-RefreshLock {
+  param(
+    [string]$Path,
+    [int]$StaleMinutes = 180
+  )
+
+  try {
+    $stream = [System.IO.File]::Open($Path, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+    try {
+      $bytes = $utf8NoBom.GetBytes((@{
+            pid = $PID
+            startedAt = Get-IsoNow
+          } | ConvertTo-Json -Depth 3))
+      $stream.Write($bytes, 0, $bytes.Length)
+    } finally {
+      $stream.Dispose()
+    }
+  } catch [System.IO.IOException] {
+    if (-not (Test-Path $Path)) {
+      throw
+    }
+
+    $lockAgeMinutes = ((Get-Date) - (Get-Item -Path $Path).LastWriteTime).TotalMinutes
+    if ($lockAgeMinutes -gt $StaleMinutes) {
+      Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+      Acquire-RefreshLock -Path $Path -StaleMinutes $StaleMinutes
+      return
+    }
+
+    throw "Another refresh is already running or the lock file is recent ($([Math]::Round($lockAgeMinutes, 1)) minutes old): $Path"
+  }
+}
+
+function Release-RefreshLock {
+  param([string]$Path)
+
+  Remove-Item -Path $Path -Force -ErrorAction SilentlyContinue
+}
+
+function Write-RefreshStatus {
+  param(
+    [string]$RunState,
+    [Nullable[bool]]$Ok,
+    [string]$StartedAt,
+    [string]$CompletedAt,
+    [Nullable[double]]$DurationSeconds,
+    [string[]]$Warnings,
+    [string[]]$Errors,
+    [object]$Scheduler,
+    [object]$Outputs
+  )
+
+  $payload = [ordered]@{
+    startedAt = $StartedAt
+    completedAt = $CompletedAt
+    runState = $RunState
+    ok = $Ok
+    durationSeconds = $DurationSeconds
+    warnings = @($Warnings)
+    errors = @($Errors)
+    scheduler = $Scheduler
+    outputs = $Outputs
+    checkedAt = Get-IsoNow
+  }
+
+  Write-JsonAtomic -Path $snapshotStatusPath -Value $payload -Depth 8
 }
 
 function Convert-ServiceState {
@@ -746,235 +912,319 @@ function Get-PlexActivitySnapshot {
   }
 }
 
-$os = Get-CimInstance Win32_OperatingSystem
-$bootTime = $os.LastBootUpTime
-$uptimeSpan = (Get-Date) - $bootTime
-$uptimeText = "{0}d {1}h {2}m" -f [Math]::Floor($uptimeSpan.TotalDays), $uptimeSpan.Hours, $uptimeSpan.Minutes
+$refreshStartedAt = Get-IsoNow
+$refreshWarnings = New-Object System.Collections.Generic.List[string]
+$refreshErrors = New-Object System.Collections.Generic.List[string]
 
-$dockerProcesses = Get-ProcessNames -Names @("Docker Desktop", "com.docker.backend", "docker-agent", "docker-sandbox")
-$dockerServices = Convert-ServiceState -Names @("com.docker.service")
-$dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
-$dockerCliVersion = $null
-$dockerContainers = @()
-$dockerImages = @()
-$dockerNetworks = @()
-$dockerVolumes = @()
-$dockerStorage = @()
-$dockerStatsIndex = @{}
-
-if ($dockerCommand) {
-  $dockerVersionOutput = & $dockerCommand.Source version --format '{{.Client.Version}}' 2>$null
-  if ($LASTEXITCODE -eq 0 -and $dockerVersionOutput) {
-    $dockerCliVersion = ($dockerVersionOutput | Select-Object -First 1).Trim()
-  }
-
-  $dockerContainers = @(Get-DockerContainers -DockerCommand $dockerCommand)
-  $dockerInspectIndex = Get-DockerInspectIndex -DockerCommand $dockerCommand -Containers $dockerContainers
-  $dockerStatsIndex = Get-DockerStatsIndex -DockerCommand $dockerCommand
-  foreach ($container in $dockerContainers) {
-    $detail = $dockerInspectIndex[$container.id]
-    if (-not $detail) {
-      $detail = $dockerInspectIndex[$container.name]
-    }
-
-    if ($detail) {
-      $container["command"] = $detail.command
-      $container["health"] = $detail.health
-      $container["exitCode"] = $detail.exitCode
-      $container["error"] = $detail.error
-      $container["restartCount"] = $detail.restartCount
-      $container["startedAt"] = $detail.startedAt
-      $container["finishedAt"] = $detail.finishedAt
-      $container["mounts"] = $detail.mounts
-    }
-
-    $usage = $dockerStatsIndex[$container.id]
-    if (-not $usage) {
-      $usage = $dockerStatsIndex[$container.name]
-    }
-    if ($usage) {
-      $container["resourceUsage"] = $usage
-    } else {
-      $container["resourceUsage"] = $null
-    }
-  }
-  $dockerImages = @(Get-DockerImages -DockerCommand $dockerCommand)
-  $dockerNetworks = @(Get-DockerNetworks -DockerCommand $dockerCommand)
-  $dockerVolumes = @(Get-DockerVolumes -DockerCommand $dockerCommand -Containers $dockerContainers)
-  $dockerStorage = @(Get-DockerSystemStorage -DockerCommand $dockerCommand)
-}
-
-$dockerRunningCount = @($dockerContainers | Where-Object { $_.state -eq "running" }).Count
-$dockerExitedCount = @($dockerContainers | Where-Object { $_.state -eq "exited" }).Count
-$dockerUnhealthyCount = @($dockerContainers | Where-Object { $_.health -eq "unhealthy" -or $_.status -match "unhealthy" }).Count
-$dockerProblemCount = @(
-  $dockerContainers |
-    Where-Object {
-      $_.health -eq "unhealthy" -or
-      $_.status -match "unhealthy" -or
-      $_.state -in @("restarting", "dead") -or
-      ($_.state -eq "exited" -and $null -ne $_.exitCode -and $_.exitCode -ne 0)
-    }
-).Count
-$dockerImageCount = @($dockerImages).Count
-$dockerNetworkCount = @($dockerNetworks).Count
-$dockerVolumeCount = @($dockerVolumes).Count
-$dockerComposeProjectCount = @(
-  $dockerContainers |
-    ForEach-Object { $_["composeProject"] } |
-    Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
-    Select-Object -Unique
-).Count
-$dockerRunning = $dockerProcesses.Count -gt 0
-$dockerStatus = if ($dockerRunning -and $dockerProblemCount -eq 0) { "healthy" } elseif ($dockerRunning -or $dockerServices.Count -gt 0) { "degraded" } else { "offline" }
-$dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy, $dockerProblemCount problems. Images: $dockerImageCount. Networks: $dockerNetworkCount. Volumes: $dockerVolumeCount. Compose projects: $dockerComposeProjectCount."
-$dockerComponent = New-Component -Name "docker" -Status $dockerStatus -Details $dockerDetails
-
-$corsairProcesses = Get-ProcessNames -Names @(
-  "Corsair.Service",
-  "iCUE",
-  "iCUEDevicePluginHost",
-  "CorsairCpuIdService",
-  "CorsairDeviceControlService"
-)
-$corsairServices = Convert-ServiceState -Names @(
-  "CorsairService",
-  "CorsairCpuIdService",
-  "CorsairDeviceControlService",
-  "CorsairDeviceListerService",
-  "iCUEUpdateService"
-)
-$corsairHealthy = ($corsairProcesses.Count -gt 0) -or (($corsairServices | Where-Object { $_.status -eq "Running" }).Count -gt 0)
-$corsairStatus = if ($corsairHealthy) { "healthy" } elseif ($corsairServices.Count -gt 0) { "degraded" } else { "offline" }
-$corsairDetails = "Processes: $(Format-ProcessSummary -Processes $corsairProcesses). Services: $(Format-ServiceSummary -Services $corsairServices)."
-$corsairComponent = New-Component -Name "corsair" -Status $corsairStatus -Details $corsairDetails
-
-$plexLocalUrl = if ($env:PLEX_LOCAL_URL) { $env:PLEX_LOCAL_URL } else { "http://127.0.0.1:32400" }
-$plexDbPath = if ($env:PLEX_DB_PATH) {
-  $env:PLEX_DB_PATH
-} else {
-  Join-Path $env:LOCALAPPDATA "Plex Media Server\Plug-in Support\Databases\com.plexapp.plugins.library.db"
-}
-
-$plexProcesses = Get-ProcessNames -Names @(
-  "Plex Media Server",
-  "Plex DLNA Server",
-  "Plex Tuner Service",
-  "Plex Update Service",
-  "PlexScriptHost"
-)
-$plexServices = Convert-ServiceState -Names @("PlexUpdateService")
-$plexIdentity = $null
-$plexToken = Get-PlexAuthToken
+Acquire-RefreshLock -Path $refreshLockPath
+Write-RefreshStatus `
+  -RunState "running" `
+  -Ok $null `
+  -StartedAt $refreshStartedAt `
+  -CompletedAt $null `
+  -DurationSeconds $null `
+  -Warnings @($refreshWarnings) `
+  -Errors @($refreshErrors) `
+  -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
+  -Outputs ([ordered]@{
+      windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+      plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+      plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+    })
 
 try {
-  $plexIdentity = Invoke-RestMethod -Uri "$plexLocalUrl/identity" -TimeoutSec 3
-} catch {
+  $os = Get-CimInstance Win32_OperatingSystem
+  $bootTime = $os.LastBootUpTime
+  $uptimeSpan = (Get-Date) - $bootTime
+  $uptimeText = "{0}d {1}h {2}m" -f [Math]::Floor($uptimeSpan.TotalDays), $uptimeSpan.Hours, $uptimeSpan.Minutes
+
+  $dockerProcesses = Get-ProcessNames -Names @("Docker Desktop", "com.docker.backend", "docker-agent", "docker-sandbox")
+  $dockerServices = Convert-ServiceState -Names @("com.docker.service")
+  $dockerCommand = Get-Command docker -ErrorAction SilentlyContinue
+  $dockerCliVersion = $null
+  $dockerContainers = @()
+  $dockerImages = @()
+  $dockerNetworks = @()
+  $dockerVolumes = @()
+  $dockerStorage = @()
+  $dockerStatsIndex = @{}
+
+  if ($dockerCommand) {
+    $dockerVersionOutput = & $dockerCommand.Source version --format '{{.Client.Version}}' 2>$null
+    if ($LASTEXITCODE -eq 0 -and $dockerVersionOutput) {
+      $dockerCliVersion = ($dockerVersionOutput | Select-Object -First 1).Trim()
+    }
+
+    $dockerContainers = @(Get-DockerContainers -DockerCommand $dockerCommand)
+    $dockerInspectIndex = Get-DockerInspectIndex -DockerCommand $dockerCommand -Containers $dockerContainers
+    $dockerStatsIndex = Get-DockerStatsIndex -DockerCommand $dockerCommand
+    foreach ($container in $dockerContainers) {
+      $detail = $dockerInspectIndex[$container.id]
+      if (-not $detail) {
+        $detail = $dockerInspectIndex[$container.name]
+      }
+
+      if ($detail) {
+        $container["command"] = $detail.command
+        $container["health"] = $detail.health
+        $container["exitCode"] = $detail.exitCode
+        $container["error"] = $detail.error
+        $container["restartCount"] = $detail.restartCount
+        $container["startedAt"] = $detail.startedAt
+        $container["finishedAt"] = $detail.finishedAt
+        $container["mounts"] = $detail.mounts
+      }
+
+      $usage = $dockerStatsIndex[$container.id]
+      if (-not $usage) {
+        $usage = $dockerStatsIndex[$container.name]
+      }
+      if ($usage) {
+        $container["resourceUsage"] = $usage
+      } else {
+        $container["resourceUsage"] = $null
+      }
+    }
+    $dockerImages = @(Get-DockerImages -DockerCommand $dockerCommand)
+    $dockerNetworks = @(Get-DockerNetworks -DockerCommand $dockerCommand)
+    $dockerVolumes = @(Get-DockerVolumes -DockerCommand $dockerCommand -Containers $dockerContainers)
+    $dockerStorage = @(Get-DockerSystemStorage -DockerCommand $dockerCommand)
+  } else {
+    $refreshWarnings.Add("Docker CLI was not available during snapshot refresh. Existing Docker data may be stale.") | Out-Null
+  }
+
+  $dockerRunningCount = @($dockerContainers | Where-Object { $_.state -eq "running" }).Count
+  $dockerExitedCount = @($dockerContainers | Where-Object { $_.state -eq "exited" }).Count
+  $dockerUnhealthyCount = @($dockerContainers | Where-Object { $_.health -eq "unhealthy" -or $_.status -match "unhealthy" }).Count
+  $dockerProblemCount = @(
+    $dockerContainers |
+      Where-Object {
+        $_.health -eq "unhealthy" -or
+        $_.status -match "unhealthy" -or
+        $_.state -in @("restarting", "dead") -or
+        ($_.state -eq "exited" -and $null -ne $_.exitCode -and $_.exitCode -ne 0)
+      }
+  ).Count
+  $dockerImageCount = @($dockerImages).Count
+  $dockerNetworkCount = @($dockerNetworks).Count
+  $dockerVolumeCount = @($dockerVolumes).Count
+  $dockerComposeProjectCount = @(
+    $dockerContainers |
+      ForEach-Object { $_["composeProject"] } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -Unique
+  ).Count
+  $dockerRunning = $dockerProcesses.Count -gt 0
+  $dockerStatus = if ($dockerRunning -and $dockerProblemCount -eq 0) { "healthy" } elseif ($dockerRunning -or $dockerServices.Count -gt 0) { "degraded" } else { "offline" }
+  $dockerDetails = "Processes: $(Format-ProcessSummary -Processes $dockerProcesses). Services: $(Format-ServiceSummary -Services $dockerServices). Containers: $dockerRunningCount running, $dockerExitedCount exited, $dockerUnhealthyCount unhealthy, $dockerProblemCount problems. Images: $dockerImageCount. Networks: $dockerNetworkCount. Volumes: $dockerVolumeCount. Compose projects: $dockerComposeProjectCount."
+  $dockerComponent = New-Component -Name "docker" -Status $dockerStatus -Details $dockerDetails
+
+  $corsairProcesses = Get-ProcessNames -Names @(
+    "Corsair.Service",
+    "iCUE",
+    "iCUEDevicePluginHost",
+    "CorsairCpuIdService",
+    "CorsairDeviceControlService"
+  )
+  $corsairServices = Convert-ServiceState -Names @(
+    "CorsairService",
+    "CorsairCpuIdService",
+    "CorsairDeviceControlService",
+    "CorsairDeviceListerService",
+    "iCUEUpdateService"
+  )
+  $corsairHealthy = ($corsairProcesses.Count -gt 0) -or (($corsairServices | Where-Object { $_.status -eq "Running" }).Count -gt 0)
+  $corsairStatus = if ($corsairHealthy) { "healthy" } elseif ($corsairServices.Count -gt 0) { "degraded" } else { "offline" }
+  $corsairDetails = "Processes: $(Format-ProcessSummary -Processes $corsairProcesses). Services: $(Format-ServiceSummary -Services $corsairServices)."
+  $corsairComponent = New-Component -Name "corsair" -Status $corsairStatus -Details $corsairDetails
+
+  $plexLocalUrl = if ($env:PLEX_LOCAL_URL) { $env:PLEX_LOCAL_URL } else { "http://127.0.0.1:32400" }
+  $plexDbPath = if ($env:PLEX_DB_PATH) {
+    $env:PLEX_DB_PATH
+  } else {
+    Join-Path $env:LOCALAPPDATA "Plex Media Server\Plug-in Support\Databases\com.plexapp.plugins.library.db"
+  }
+
+  $plexProcesses = Get-ProcessNames -Names @(
+    "Plex Media Server",
+    "Plex DLNA Server",
+    "Plex Tuner Service",
+    "Plex Update Service",
+    "PlexScriptHost"
+  )
+  $plexServices = Convert-ServiceState -Names @("PlexUpdateService")
   $plexIdentity = $null
-}
+  $plexToken = Get-PlexAuthToken
 
-$plexIndexSummary = $null
-$python = Get-Command python -ErrorAction SilentlyContinue
-if ($python -and (Test-Path $plexDbPath) -and (Test-Path $pythonScriptPath)) {
-  $rawSummary = & $python.Source $pythonScriptPath --db-path $plexDbPath --output $plexIndexPath
-  if ($LASTEXITCODE -eq 0 -and $rawSummary) {
-    $plexIndexSummary = $rawSummary | ConvertFrom-Json
+  if ([string]::IsNullOrWhiteSpace($plexToken)) {
+    $refreshWarnings.Add("No Plex token was found. Continue-watching, on-deck, and history snapshots may be incomplete.") | Out-Null
   }
-}
 
-$plexSectionsForActivity = if ($plexIndexSummary) { $plexIndexSummary.sections } else { @() }
-$plexActivitySnapshot = Get-PlexActivitySnapshot -BaseUrl $plexLocalUrl -Token $plexToken -Sections $plexSectionsForActivity
-
-$plexReachable = $null -ne $plexIdentity
-$plexIndexedItems = if ($plexIndexSummary) { [int]$plexIndexSummary.indexedItemCount } else { 0 }
-$plexSectionCount = if ($plexIndexSummary) { [int]$plexIndexSummary.sectionCount } else { 0 }
-$plexStatus = if ($plexReachable) {
-  "healthy"
-} elseif ($plexProcesses.Count -gt 0) {
-  "degraded"
-} else {
-  "offline"
-}
-
-$plexVersion = $null
-if ($plexIdentity) {
-  $plexVersion = [string]$plexIdentity.MediaContainer.version
-}
-
-$plexDetailsParts = @(
-  "Reachable on ${plexLocalUrl}: $plexReachable",
-  "Processes: $(Format-ProcessSummary -Processes $plexProcesses)",
-  "Services: $(Format-ServiceSummary -Services $plexServices)"
-)
-
-if ($plexVersion) {
-  $plexDetailsParts += "Version: $plexVersion"
-}
-
-if ($plexIndexedItems -gt 0) {
-  $plexDetailsParts += "Indexed items: $plexIndexedItems across $plexSectionCount sections"
-}
-
-$plexComponent = New-Component -Name "plex" -Status $plexStatus -Details (($plexDetailsParts -join ". ") + ".")
-
-$systemComponent = New-Component -Name "system" -Status "healthy" -Details "Windows host up for $uptimeText."
-
-$components = @(
-  $systemComponent
-  $dockerComponent
-  $corsairComponent
-  $plexComponent
-)
-
-$healthyComponents = ($components | Where-Object { $_.status -eq "healthy" }).Count
-$degradedComponents = ($components | Where-Object { $_.status -eq "degraded" }).Count
-$summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline."
-
-$payload = [ordered]@{
-  generatedAt = Get-IsoNow
-  summary = $summary
-  host = [ordered]@{
-    computerName = $env:COMPUTERNAME
-    osName = [string]$os.Caption
-    osVersion = [string]$os.Version
-    lastBootUpTime = $bootTime.ToString("o")
-    uptime = $uptimeText
+  try {
+    $plexIdentity = Invoke-RestMethod -Uri "$plexLocalUrl/identity" -TimeoutSec 3
+  } catch {
+    $plexIdentity = $null
+    $refreshWarnings.Add("Plex identity probe failed. Plex runtime status may be degraded or offline.") | Out-Null
   }
-  components = $components
-  docker = [ordered]@{
-    available = ($null -ne $dockerCommand)
-    cliVersion = $dockerCliVersion
-    containerCount = @($dockerContainers).Count
-    runningCount = $dockerRunningCount
-    exitedCount = $dockerExitedCount
-    unhealthyCount = $dockerUnhealthyCount
-    problemCount = $dockerProblemCount
-    imageCount = $dockerImageCount
-    networkCount = $dockerNetworkCount
-    composeProjectCount = $dockerComposeProjectCount
-    containers = $dockerContainers
-    images = $dockerImages
-    networks = $dockerNetworks
-    volumes = $dockerVolumes
-    storage = $dockerStorage
-  }
-  plex = [ordered]@{
-    reachable = $plexReachable
-    localUrl = $plexLocalUrl
-    version = $plexVersion
-    indexedItemCount = $plexIndexedItems
-    sectionCount = $plexSectionCount
-    libraries = if ($plexIndexSummary) { $plexIndexSummary.sections } else { @() }
-  }
-}
 
-$hostStatusJson = $payload | ConvertTo-Json -Depth 8
-$utf8NoBom = [System.Text.UTF8Encoding]::new($false)
-[System.IO.File]::WriteAllText($hostStatusPath, $hostStatusJson, $utf8NoBom)
-$plexActivityJson = $plexActivitySnapshot | ConvertTo-Json -Depth 8
-[System.IO.File]::WriteAllText($plexActivityPath, $plexActivityJson, $utf8NoBom)
-Write-Host "Wrote host status to $hostStatusPath"
-if (Test-Path $plexIndexPath) {
-  Write-Host "Wrote Plex library index to $plexIndexPath"
+  $plexIndexSummary = $null
+  $python = Get-Command python -ErrorAction SilentlyContinue
+  $plexIndexTempPath = Join-Path $dataDir ("plex-library-index." + [System.IO.Path]::GetRandomFileName() + ".json")
+
+  if ($python -and (Test-Path $plexDbPath) -and (Test-Path $pythonScriptPath)) {
+    $rawSummary = & $python.Source $pythonScriptPath --db-path $plexDbPath --output $plexIndexTempPath
+    if ($LASTEXITCODE -eq 0 -and $rawSummary) {
+      $plexIndexSummary = $rawSummary | ConvertFrom-Json
+      if (Test-Path $plexIndexTempPath) {
+        Move-Item -Path $plexIndexTempPath -Destination $plexIndexPath -Force
+      }
+    } else {
+      $refreshWarnings.Add("Plex library export did not complete successfully. Existing Plex library data may be stale.") | Out-Null
+    }
+  } else {
+    $refreshWarnings.Add("Plex library export was skipped because Python, the Plex database, or the export script was unavailable. Existing Plex library data may be stale.") | Out-Null
+  }
+
+  if (Test-Path $plexIndexTempPath) {
+    Remove-Item -Path $plexIndexTempPath -Force -ErrorAction SilentlyContinue
+  }
+
+  $plexSectionsForActivity = if ($plexIndexSummary) { $plexIndexSummary.sections } else { @() }
+  $plexActivitySnapshot = Get-PlexActivitySnapshot -BaseUrl $plexLocalUrl -Token $plexToken -Sections $plexSectionsForActivity
+
+  $plexReachable = $null -ne $plexIdentity
+  $plexIndexedItems = if ($plexIndexSummary) { [int]$plexIndexSummary.indexedItemCount } else { 0 }
+  $plexSectionCount = if ($plexIndexSummary) { [int]$plexIndexSummary.sectionCount } else { 0 }
+  $plexStatus = if ($plexReachable) {
+    "healthy"
+  } elseif ($plexProcesses.Count -gt 0) {
+    "degraded"
+  } else {
+    "offline"
+  }
+
+  $plexVersion = $null
+  if ($plexIdentity) {
+    $plexVersion = [string]$plexIdentity.MediaContainer.version
+  }
+
+  $plexDetailsParts = @(
+    "Reachable on ${plexLocalUrl}: $plexReachable",
+    "Processes: $(Format-ProcessSummary -Processes $plexProcesses)",
+    "Services: $(Format-ServiceSummary -Services $plexServices)"
+  )
+
+  if ($plexVersion) {
+    $plexDetailsParts += "Version: $plexVersion"
+  }
+
+  if ($plexIndexedItems -gt 0) {
+    $plexDetailsParts += "Indexed items: $plexIndexedItems across $plexSectionCount sections"
+  }
+
+  $plexComponent = New-Component -Name "plex" -Status $plexStatus -Details (($plexDetailsParts -join ". ") + ".")
+
+  $systemComponent = New-Component -Name "system" -Status "healthy" -Details "Windows host up for $uptimeText."
+
+  $components = @(
+    $systemComponent
+    $dockerComponent
+    $corsairComponent
+    $plexComponent
+  )
+
+  $healthyComponents = ($components | Where-Object { $_.status -eq "healthy" }).Count
+  $degradedComponents = ($components | Where-Object { $_.status -eq "degraded" }).Count
+  $summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline."
+
+  $payload = [ordered]@{
+    generatedAt = Get-IsoNow
+    summary = $summary
+    host = [ordered]@{
+      computerName = $env:COMPUTERNAME
+      osName = [string]$os.Caption
+      osVersion = [string]$os.Version
+      lastBootUpTime = $bootTime.ToString("o")
+      uptime = $uptimeText
+    }
+    components = $components
+    docker = [ordered]@{
+      available = ($null -ne $dockerCommand)
+      cliVersion = $dockerCliVersion
+      containerCount = @($dockerContainers).Count
+      runningCount = $dockerRunningCount
+      exitedCount = $dockerExitedCount
+      unhealthyCount = $dockerUnhealthyCount
+      problemCount = $dockerProblemCount
+      imageCount = $dockerImageCount
+      networkCount = $dockerNetworkCount
+      composeProjectCount = $dockerComposeProjectCount
+      containers = $dockerContainers
+      images = $dockerImages
+      networks = $dockerNetworks
+      volumes = $dockerVolumes
+      storage = $dockerStorage
+    }
+    plex = [ordered]@{
+      reachable = $plexReachable
+      localUrl = $plexLocalUrl
+      version = $plexVersion
+      indexedItemCount = $plexIndexedItems
+      sectionCount = $plexSectionCount
+      libraries = if ($plexIndexSummary) { $plexIndexSummary.sections } else { @() }
+    }
+  }
+
+  Write-JsonAtomic -Path $hostStatusPath -Value $payload -Depth 8
+  Write-JsonAtomic -Path $plexActivityPath -Value $plexActivitySnapshot -Depth 8
+
+  $completedAt = Get-IsoNow
+  $durationSeconds = (([DateTimeOffset]::Parse($completedAt)) - ([DateTimeOffset]::Parse($refreshStartedAt))).TotalSeconds
+  $outputs = [ordered]@{
+    windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath -SourceTimestamp $payload.generatedAt
+    plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath -SourceTimestamp $(if ($plexIndexSummary) { [string]$plexIndexSummary.generatedAt } else { $null })
+    plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath -SourceTimestamp $(if ($plexActivitySnapshot) { [string]$plexActivitySnapshot.fetchedAt } else { $null })
+  }
+
+  Write-RefreshStatus `
+    -RunState "completed" `
+    -Ok $true `
+    -StartedAt $refreshStartedAt `
+    -CompletedAt $completedAt `
+    -DurationSeconds $durationSeconds `
+    -Warnings @($refreshWarnings) `
+    -Errors @($refreshErrors) `
+    -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
+    -Outputs $outputs
+
+  Write-Host "Wrote host status to $hostStatusPath"
+  if (Test-Path $plexIndexPath) {
+    Write-Host "Wrote Plex library index to $plexIndexPath"
+  }
+  Write-Host "Wrote Plex activity snapshot to $plexActivityPath"
+  Write-Host "Wrote snapshot status to $snapshotStatusPath"
+} catch {
+  $message = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+  $refreshErrors.Add($message) | Out-Null
+  $completedAt = Get-IsoNow
+  $durationSeconds = (([DateTimeOffset]::Parse($completedAt)) - ([DateTimeOffset]::Parse($refreshStartedAt))).TotalSeconds
+
+  Write-RefreshStatus `
+    -RunState "failed" `
+    -Ok $false `
+    -StartedAt $refreshStartedAt `
+    -CompletedAt $completedAt `
+    -DurationSeconds $durationSeconds `
+    -Warnings @($refreshWarnings) `
+    -Errors @($refreshErrors) `
+    -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
+    -Outputs ([ordered]@{
+        windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+        plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+        plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+      })
+
+  throw
+} finally {
+  Release-RefreshLock -Path $refreshLockPath
 }
-Write-Host "Wrote Plex activity snapshot to $plexActivityPath"

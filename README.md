@@ -15,7 +15,10 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 
 - one shared tool registry with both `stdio` and HTTP transports
 - Windows host refresh scripts for Docker Desktop, Plex, and Corsair iCUE status
+- snapshot freshness reporting plus an operations dashboard for stale-data debugging
+- natural-language entrypoints for home, Docker, notes, and Plex lookups
 - a searchable exported Plex library index plus live Plex activity snapshots
+- deeper Docker inspection for port mappings, mounts, restart patterns, and failure review
 - OAuth support for ChatGPT and bearer-token support for generic remote clients
 - Docker, Caddy, and Tailscale deployment options
 - audit logging plus smoke and production verification scripts
@@ -23,9 +26,16 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 ## Tool groups
 
 - Discovery:
+  - `list_home_commands`
   - `list_docker_commands`
   - `list_plex_commands`
+  - `find_home`
+  - `find_docker`
+  - `find_notes`
   - `find_plex`
+- Snapshots and dashboards:
+  - `get_snapshot_status`
+  - `get_operations_dashboard`
 - Host and notes:
   - `ping`
   - `get_time`
@@ -35,11 +45,15 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `search_notes`
   - `read_note`
 - Docker:
-  - container status, projects, images, networks, volumes, cleanup candidates, recent activity, and resource usage
+  - container status, projects, images, networks, volumes, cleanup candidates, recent activity, resource usage, port maps, mount reports, and restart reports
 - Plex:
   - library discovery, title search, natural lookup, show and season summaries, recent additions, on-deck and continue-watching data, unwatched reports, and duplicate detection
 
-For natural Plex requests, start with `find_plex`. It is the easiest way to ask for things like `Sopranos`, `Sopranos season 2`, or `Pine Barrens` without remembering the exact specialized tool name first.
+For natural requests:
+
+- start with `find_home` when you are not sure whether the answer lives in Plex, Docker, notes, or homelab data
+- start with `find_plex` for Plex-first lookups like `Sopranos`, `Sopranos season 2`, or `Pine Barrens`
+- use `get_snapshot_status` when results feel old or inconsistent
 
 ## Quick start
 
@@ -61,7 +75,13 @@ For natural Plex requests, start with `find_plex`. It is the easiest way to ask 
    npm run refresh:host
    ```
 
-4. Pick the path you care about first:
+4. Optional but recommended: install the Windows scheduled refresh so the snapshots stay current:
+
+   ```powershell
+   npm run schedule:host-refresh
+   ```
+
+5. Pick the path you care about first:
 
    - Local client only:
      Run `npm run build`, then use `node dist/index-stdio.js` or the Claude setup in this README.
@@ -150,11 +170,24 @@ mcp-home/
    - local Caddy/Tailscale HTTP on `127.0.0.1:8788`
    - the origin derived from `MCP_SERVER_URL`
 
-7. Run the production verification bundle when you already have the server up:
+7. Run the stdio smoke test when you want a transport-agnostic tool check that still works in OAuth mode:
+
+   ```powershell
+   npm run smoke:stdio
+   ```
+
+8. Run the production verification bundle when you already have the server up:
 
    ```powershell
    npm run verify:prod
    ```
+
+   `verify:prod` now runs:
+
+   - `npm run build`
+   - `npm run typecheck:scripts`
+   - `npm run smoke:stdio`
+   - `npm run smoke:http`
 
 If you only want local Claude or another local `stdio` client, you can stop here. You do not need Caddy, Tailscale, ChatGPT OAuth, or separate API keys for that local-only path.
 
@@ -170,12 +203,16 @@ npm run refresh:host
 
 That script:
 
+- takes a lightweight lock so overlapping refresh runs do not clobber each other
+- writes snapshot files atomically to reduce half-written or partially updated data
 - reads Windows uptime plus Docker Desktop, Corsair iCUE, and Plex process or service state
 - captures a read-only Docker snapshot from `docker ps -a`, `docker inspect`, `docker stats --no-stream`, `docker image ls`, `docker network ls`, `docker volume ls`, and `docker system df`
 - probes the local Plex server at `http://127.0.0.1:32400/identity`
 - exports a searchable Plex library index from the local Plex SQLite database
 - captures a Plex activity snapshot from local sessions, watch history, continue-watching hubs, on-deck hubs, and unwatched library sections when a local token is available
+- writes a freshness and scheduler summary that the MCP server can read back later
 - writes:
+  - `data/local/snapshot-status.json`
   - `data/local/windows-host-status.json`
   - `data/local/plex-library-index.json`
   - `data/local/plex-activity.json`
@@ -184,6 +221,12 @@ The current implementation expects Python 3 on the Windows host for the Plex dat
 
 Once you have refreshed the host data, these tools become useful:
 
+- `list_home_commands`
+- `get_snapshot_status`
+- `get_operations_dashboard`
+- `find_home`
+- `find_docker`
+- `find_notes`
 - `list_docker_commands`
 - `get_host_status`
 - `get_docker_status`
@@ -199,6 +242,9 @@ Once you have refreshed the host data, these tools become useful:
 - `get_docker_project_details`
 - `list_docker_volumes`
 - `get_docker_cleanup_candidates`
+- `get_docker_port_map`
+- `get_docker_mount_report`
+- `get_docker_restart_report`
 - `list_plex_commands`
 - `find_plex`
 - `get_plex_status`
@@ -248,6 +294,31 @@ powershell -ExecutionPolicy Bypass -File scripts/install-host-refresh-task.ps1 -
 ```
 
 This creates a user-level scheduled task named `MCP Home Host Refresh` that runs `scripts/refresh-windows-host.ps1`.
+
+The scheduled task uses a hidden PowerShell window, and `get_snapshot_status` will tell you whether the task is installed plus when it last ran.
+
+## Freshness and natural-language entrypoints
+
+If the server feels stale during testing, start with:
+
+```text
+get_snapshot_status
+```
+
+That reports:
+
+- whether the last host refresh completed successfully
+- whether the scheduled task is installed
+- how old each snapshot is
+- whether each snapshot is `fresh`, `late`, `stale`, or missing
+
+For day-to-day use, these are the easiest broad entrypoints:
+
+- `find_home` for cross-domain lookup
+- `find_docker` for containers, projects, images, networks, and volumes
+- `find_notes` for local markdown notes
+- `find_plex` for Plex-first searches
+- `get_operations_dashboard` for one quick operational overview
 
 ## Model API checks
 
@@ -305,6 +376,8 @@ Your reverse proxy must expose these OAuth routes publicly, not just `/mcp`:
 ## Production polish notes
 
 The container image now includes a built-in healthcheck against `/health`, and both Compose files wait for `mcp-home` to become healthy before starting Caddy. This gives you a more reliable startup path for local restarts, rebuilds, and tunnel reconnects.
+
+The host refresh path now also records a separate `snapshot-status.json` file, so the MCP server can tell you when the underlying Windows, Docker, and Plex data is old instead of silently answering from stale files.
 
 ## Recommended remote path: Caddy + Tailscale Funnel
 
@@ -481,13 +554,15 @@ Use `docker-compose.tailscale.yml` plus `Caddyfile.tailscale` when you want Tail
 - ChatGPT connects but does not show the newest tool list
   Disconnect and reconnect the app, or remove and re-add it, then start a fresh chat.
 - Plex or Docker tools return stale data
-  Run `npm run refresh:host` on the Windows host, or install the scheduled refresh task.
+  Run `npm run refresh:host` on the Windows host, then use `get_snapshot_status` to confirm freshness. If the snapshots keep going stale, install the scheduled refresh task.
 - `tailscale` is not recognized in PowerShell
   Use the full executable path, for example `C:\Program Files\Tailscale\tailscale.exe`, or add Tailscale to `PATH`.
 - OpenAI or Anthropic tests fail even though ChatGPT works
   ChatGPT subscriptions and API billing are separate. `npm run test:openai:mcp` and `npm run test:anthropic:mcp` need real API keys and a publicly reachable MCP URL.
 - Docker or Caddy starts but the stack is not ready yet
   Check `docker ps` and wait for `mcp-home` to become `healthy` before testing the public endpoint.
+- The host refresh looks healthy, but results still seem old
+  `snapshot-status.json` and `get_snapshot_status` will show whether only one of the three snapshot files is lagging, which is common when Plex export prerequisites are missing.
 
 ## Security notes
 
@@ -506,7 +581,7 @@ Before flipping the repository from private to public:
 - confirm `.env`, `data/local/`, `logs/`, and OAuth state files are still ignored
 - rotate any real tokens or passwords that were ever used locally, even if they were later removed
 - sanity-check `README.md`, sample notes, and `data/homelab-status.json` for anything you would not want indexed publicly
-- decide whether you want to add an explicit license before publishing
+- confirm the included `LICENSE` matches how you want others to reuse the project
 
 ## Next steps
 
@@ -514,6 +589,8 @@ Good next additions:
 
 - per-tool auth policy
 - a separate admin-only MCP server for higher-risk tools
+- richer Plex metadata like actors, directors, narrators, and collections
+- broader host telemetry if you want CPU, memory, disk, or UPS-specific dashboards
 
 ## Audit logging
 

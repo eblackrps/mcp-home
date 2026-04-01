@@ -4,6 +4,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import {
+  formatDockerFind,
+  formatDockerMountReport,
+  formatDockerPortMap,
   formatDockerCleanupCandidates,
   formatDockerComposeHealth,
   formatDockerContainerDetails,
@@ -14,6 +17,7 @@ import {
   formatDockerProjectDetails,
   formatDockerProjects,
   formatDockerRecentActivity,
+  formatDockerRestartReport,
   formatDockerResourceUsage,
   formatDockerStatus,
   formatDockerVolumes,
@@ -21,6 +25,7 @@ import {
   formatWindowsHostStatus,
   readWindowsHostStatus
 } from "./host.js";
+import { formatHomeFind, formatNotesFind, formatOperationsDashboard } from "./home.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
   browsePlexByGenre,
@@ -69,6 +74,7 @@ import {
   readPlexActivitySnapshot
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
+import { formatSnapshotStatus, readSnapshotOverview } from "./snapshots.js";
 import { SERVER_NAME, SERVER_VERSION } from "./server-meta.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -76,6 +82,7 @@ const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", impo
 type CommandCatalogEntry = {
   name: string;
   summary: string;
+  group?: string;
   options?: string[];
   example?: string;
 };
@@ -157,6 +164,24 @@ const DOCKER_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Summarize reclaimable Docker storage plus exited containers, unused images, and unused volumes.",
     options: ["olderThanHours", "limit"],
     example: "get_docker_cleanup_candidates olderThanHours=72"
+  },
+  {
+    name: "get_docker_port_map",
+    summary: "Show container port mappings, compose context, and networks from the latest Docker snapshot.",
+    options: ["name", "project", "publishedOnly", "limit"],
+    example: "get_docker_port_map project=mcphome"
+  },
+  {
+    name: "get_docker_mount_report",
+    summary: "Show bind and volume mounts plus read-only or read-write access.",
+    options: ["name", "project", "accessMode", "limit"],
+    example: "get_docker_mount_report accessMode=ro"
+  },
+  {
+    name: "get_docker_restart_report",
+    summary: "Surface restart counts, recent failures, and exit patterns across Docker containers.",
+    options: ["name", "project", "sinceHours", "includeHealthy", "limit"],
+    example: "get_docker_restart_report sinceHours=168"
   }
 ];
 
@@ -303,6 +328,106 @@ const PLEX_COMMAND_CATALOG: CommandCatalogEntry[] = [
   }
 ];
 
+function withGroup(entries: CommandCatalogEntry[], group: string): CommandCatalogEntry[] {
+  return entries.map((entry) => ({
+    ...entry,
+    group
+  }));
+}
+
+const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "list_home_commands",
+    group: "discovery",
+    summary: "List the major MCP command groups exposed by this server, with optional area or keyword filtering.",
+    options: ["area", "query"],
+    example: "list_home_commands area=docker"
+  },
+  {
+    name: "list_docker_commands",
+    group: "discovery",
+    summary: "List Docker-focused commands with short summaries and examples.",
+    options: ["query"],
+    example: "list_docker_commands query=cleanup"
+  },
+  {
+    name: "list_plex_commands",
+    group: "discovery",
+    summary: "List Plex-focused commands with short summaries and examples.",
+    options: ["query"],
+    example: "list_plex_commands query=episode"
+  },
+  {
+    name: "get_snapshot_status",
+    group: "snapshot",
+    summary: "Show snapshot freshness, scheduler status, and whether the host refresh data is current or stale.",
+    example: "get_snapshot_status"
+  },
+  {
+    name: "get_operations_dashboard",
+    group: "snapshot",
+    summary: "Roll up snapshot freshness, Windows host health, Docker, Plex activity, notes, and homelab status into one report.",
+    example: "get_operations_dashboard"
+  },
+  {
+    name: "find_home",
+    group: "discovery",
+    summary: "Natural cross-domain finder that searches Plex, Docker, notes, and homelab data from a single query.",
+    options: ["query", "area", "limit"],
+    example: "find_home query=Sopranos"
+  },
+  {
+    name: "find_docker",
+    group: "docker",
+    summary: "Natural Docker finder for containers, projects, images, networks, or volumes.",
+    options: ["query", "domain", "limit"],
+    example: "find_docker query=mcp-home"
+  },
+  {
+    name: "find_notes",
+    group: "notes",
+    summary: "Natural note finder that surfaces exact slug or title matches plus content previews.",
+    options: ["query", "limit"],
+    example: "find_notes query=homelab"
+  },
+  {
+    name: "get_host_status",
+    group: "host",
+    summary: "Read the Windows host snapshot with system, Docker, Corsair, and Plex component health.",
+    options: ["component"],
+    example: "get_host_status component=docker"
+  },
+  {
+    name: "get_homelab_status",
+    group: "host",
+    summary: "Read the static homelab status snapshot with optional service filtering.",
+    options: ["service"],
+    example: "get_homelab_status service=backups"
+  },
+  {
+    name: "list_notes",
+    group: "notes",
+    summary: "List available local markdown notes by slug and title.",
+    example: "list_notes"
+  },
+  {
+    name: "search_notes",
+    group: "notes",
+    summary: "Search local notes by keyword, title, tags, and body text.",
+    options: ["query"],
+    example: "search_notes query=backup"
+  },
+  {
+    name: "read_note",
+    group: "notes",
+    summary: "Read a local markdown note when you already know the slug.",
+    options: ["slug"],
+    example: "read_note slug=homelab"
+  },
+  ...withGroup(DOCKER_COMMAND_CATALOG, "docker"),
+  ...withGroup(PLEX_COMMAND_CATALOG, "plex")
+];
+
 function formatListEntry(slug: string, title: string, tags: string[]) {
   const suffix = tags.length > 0 ? ` | tags: ${tags.join(", ")}` : "";
   return `- ${slug} | ${title}${suffix}`;
@@ -312,7 +437,7 @@ function formatCommandCatalog(title: string, entries: CommandCatalogEntry[], que
   const normalized = query?.trim().toLowerCase();
   const filtered = normalized
     ? entries.filter((entry) => {
-        const haystack = [entry.name, entry.summary, ...(entry.options ?? []), entry.example ?? ""]
+        const haystack = [entry.name, entry.group ?? "", entry.summary, ...(entry.options ?? []), entry.example ?? ""]
           .join(" ")
           .toLowerCase();
         return haystack.includes(normalized);
@@ -332,6 +457,9 @@ function formatCommandCatalog(title: string, entries: CommandCatalogEntry[], que
 
   for (const entry of filtered) {
     lines.push(`- ${entry.name}`);
+    if (entry.group) {
+      lines.push(`  Group: ${entry.group}`);
+    }
     lines.push(`  ${entry.summary}`);
 
     if (entry.options && entry.options.length > 0) {
@@ -402,6 +530,31 @@ export function createServer() {
   );
 
   server.tool(
+    "list_home_commands",
+    "Use this to list the major MCP commands exposed by this server, with optional area and keyword filters.",
+    {
+      area: z
+        .enum(["all", "discovery", "snapshot", "host", "docker", "plex", "notes"])
+        .optional()
+        .describe("Optional command group filter"),
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional keyword filter, for example stale, mount, restart, watch, or summary")
+    },
+    async ({ area, query }) => {
+      return withAudit("list_home_commands", { area, query }, async () => {
+        const areaFiltered = !area || area === "all" ? HOME_COMMAND_CATALOG : HOME_COMMAND_CATALOG.filter((entry) => entry.group === area);
+
+        return {
+          content: [{ type: "text", text: formatCommandCatalog("Home", areaFiltered, query) }]
+        };
+      });
+    }
+  );
+
+  server.tool(
     "list_docker_commands",
     "Use this to list Docker-related MCP commands exposed by this server, with an optional keyword filter.",
     {
@@ -432,6 +585,140 @@ export function createServer() {
       return withAudit("list_plex_commands", { query }, async () => ({
         content: [{ type: "text", text: formatCommandCatalog("Plex", PLEX_COMMAND_CATALOG, query) }]
       }));
+    }
+  );
+
+  server.tool(
+    "get_snapshot_status",
+    "Use this to inspect host snapshot freshness, scheduled refresh state, and whether Docker and Plex data may be stale.",
+    {},
+    async () => {
+      return withAudit("get_snapshot_status", undefined, async () => {
+        try {
+          const overview = await readSnapshotOverview();
+          return {
+            content: [{ type: "text", text: formatSnapshotStatus(overview) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_snapshot_status returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to read snapshot freshness: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_operations_dashboard",
+    "Use this to roll up snapshot freshness, Windows host health, Docker, Plex activity, notes, and homelab status into one report.",
+    {},
+    async () => {
+      return withAudit("get_operations_dashboard", undefined, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatOperationsDashboard(notesDir) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_operations_dashboard returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to build the operations dashboard: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_home",
+    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, notes, or homelab data.",
+    {
+      query: z.string().min(1).describe("Natural search phrase, for example Sopranos, backups, or mcp-home"),
+      area: z
+        .enum(["auto", "docker", "plex", "notes", "homelab"])
+        .optional()
+        .describe("Optional scope if you already know the area to search"),
+      limit: z.number().int().min(1).max(10).optional().describe("Maximum number of top matches to include, from 1 to 10")
+    },
+    async ({ query, area, limit }) => {
+      return withAudit("find_home", { query, area, limit }, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatHomeFind(notesDir, { query, area, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_home returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to run the home finder: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_docker",
+    "Use this as the natural Docker entrypoint for container, project, image, network, or volume lookups.",
+    {
+      query: z.string().min(1).describe("Natural Docker query, for example mcp-home, caddy, bridge, or postgres"),
+      domain: z
+        .enum(["auto", "container", "project", "image", "network", "volume"])
+        .optional()
+        .describe("Optional Docker object scope"),
+      limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matches to return, from 1 to 25")
+    },
+    async ({ query, domain, limit }) => {
+      return withAudit("find_docker", { query, domain, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerFind(status, { query, domain, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_docker returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search Docker data: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_notes",
+    "Use this as the natural note entrypoint when you want to find a note by slug, title, tags, or body text.",
+    {
+      query: z.string().min(1).describe("Natural note query, for example homelab, backups, or welcome"),
+      limit: z.number().int().min(1).max(10).optional().describe("Maximum number of matching notes to include, from 1 to 10")
+    },
+    async ({ query, limit }) => {
+      return withAudit("find_notes", { query, limit }, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatNotesFind(notesDir, query, limit) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_notes returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to search notes: ${message}` }],
+            isError: true
+          };
+        }
+      });
     }
   );
 
@@ -937,6 +1224,106 @@ export function createServer() {
               {
                 type: "text",
                 text: `Unable to summarize Docker cleanup candidates: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_port_map",
+    "Use this to inspect Docker port mappings, compose context, and network placement from the local Windows host snapshot.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image substring filter"),
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      publishedOnly: z.boolean().optional().describe("Whether to show only containers with published ports; defaults to true"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, project, publishedOnly, limit }) => {
+      return withAudit("get_docker_port_map", { name, project, publishedOnly, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerPortMap(status, { name, project, publishedOnly, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_port_map returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker port mappings: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_mount_report",
+    "Use this to inspect Docker mounts, including bind and volume targets plus read-only vs read-write access.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image substring filter"),
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      accessMode: z.enum(["ro", "rw"]).optional().describe("Optional access mode filter"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, project, accessMode, limit }) => {
+      return withAudit("get_docker_mount_report", { name, project, accessMode, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerMountReport(status, { name, project, accessMode, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_mount_report returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker mounts: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_docker_restart_report",
+    "Use this to inspect restart counts, recent failures, and exit patterns from the Docker snapshot.",
+    {
+      name: z.string().min(1).optional().describe("Optional container name or image substring filter"),
+      project: z.string().min(1).optional().describe("Optional compose project name filter"),
+      sinceHours: z.number().int().min(1).max(24 * 180).optional().describe("Lookback window in hours, from 1 to 4320"),
+      includeHealthy: z.boolean().optional().describe("Include healthy containers too; defaults to false"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of containers to return, from 1 to 50")
+    },
+    async ({ name, project, sinceHours, includeHealthy, limit }) => {
+      return withAudit("get_docker_restart_report", { name, project, sinceHours, includeHealthy, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDockerRestartReport(status, { name, project, sinceHours, includeHealthy, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_docker_restart_report returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Docker restart patterns: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

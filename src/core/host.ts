@@ -1485,6 +1485,428 @@ export function formatDockerNetworks(
   return lines.join("\n");
 }
 
+export function formatDockerFind(
+  status: WindowsHostStatus,
+  options: {
+    query: string;
+    domain?: "auto" | "container" | "project" | "image" | "network" | "volume";
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const query = normalize(options.query);
+  if (!query) {
+    return `Generated: ${status.generatedAt}\nDocker finder:\n\n- A non-empty Docker query is required.`;
+  }
+
+  const domain = options.domain ?? "auto";
+  const limit = Math.min(Math.max(options.limit ?? 10, 1), 25);
+
+  const containers = docker.containers
+    .filter(
+      (container) =>
+        container.name.toLowerCase().includes(query) ||
+        container.id.toLowerCase().includes(query) ||
+        container.image.toLowerCase().includes(query) ||
+        (container.composeProject?.toLowerCase().includes(query) ?? false) ||
+        (container.composeService?.toLowerCase().includes(query) ?? false)
+    )
+    .slice(0, limit);
+
+  const projects = getDockerComposeProjects(docker.containers)
+    .filter(
+      (project) =>
+        project.name.toLowerCase().includes(query) ||
+        [...project.services].some((service) => service.toLowerCase().includes(query)) ||
+        project.containers.some((container) => container.name.toLowerCase().includes(query))
+    )
+    .slice(0, limit);
+
+  const images = docker.images
+    .filter(
+      (image) =>
+        image.repository.toLowerCase().includes(query) ||
+        image.tag.toLowerCase().includes(query) ||
+        image.id.toLowerCase().includes(query)
+    )
+    .slice(0, limit);
+
+  const networks = docker.networks
+    .filter(
+      (network) =>
+        network.name.toLowerCase().includes(query) ||
+        network.id.toLowerCase().includes(query) ||
+        network.driver.toLowerCase().includes(query) ||
+        (network.composeProject?.toLowerCase().includes(query) ?? false)
+    )
+    .slice(0, limit);
+
+  const volumes = docker.volumes
+    .filter(
+      (volume) =>
+        volume.name.toLowerCase().includes(query) ||
+        volume.driver.toLowerCase().includes(query) ||
+        (volume.attachedContainers?.some((container) => container.toLowerCase().includes(query)) ?? false)
+    )
+    .slice(0, limit);
+
+  const sections = [
+    domain === "auto" || domain === "container"
+      ? {
+          label: "Containers",
+          count: containers.length,
+          lines:
+            containers.length === 0
+              ? []
+              : containers.flatMap((container) => {
+                  const detailBits = [
+                    container.state,
+                    container.health ? `health=${container.health}` : "",
+                    container.composeProject ? `project=${container.composeProject}` : "",
+                    container.composeService ? `service=${container.composeService}` : ""
+                  ]
+                    .filter(Boolean)
+                    .join(" | ");
+                  return [
+                    `- ${container.name} | ${container.image}${detailBits ? ` | ${detailBits}` : ""}`,
+                    container.ports ? `  Ports: ${container.ports}` : `  Status: ${container.status}`
+                  ];
+                })
+        }
+      : undefined,
+    domain === "auto" || domain === "project"
+      ? {
+          label: "Projects",
+          count: projects.length,
+          lines:
+            projects.length === 0
+              ? []
+              : projects.flatMap((project) => {
+                  const health = getDockerProjectHealth(project.containers);
+                  return [
+                    `- ${project.name} | ${health} | ${project.containers.length} containers | ${project.services.size} services`,
+                    `  Services: ${[...project.services].sort().join(", ") || "none"}`
+                  ];
+                })
+        }
+      : undefined,
+    domain === "auto" || domain === "image"
+      ? {
+          label: "Images",
+          count: images.length,
+          lines:
+            images.length === 0
+              ? []
+              : images.flatMap((image) => [
+                  `- ${image.repository}:${image.tag} | ${image.size || "size unknown"} | ${image.containers ?? 0} containers`,
+                  image.createdAt ? `  Created: ${image.createdAt}` : ""
+                ])
+        }
+      : undefined,
+    domain === "auto" || domain === "network"
+      ? {
+          label: "Networks",
+          count: networks.length,
+          lines:
+            networks.length === 0
+              ? []
+              : networks.flatMap((network) => [
+                  `- ${network.name} | ${network.driver} | ${network.scope}${network.composeProject ? ` | compose=${network.composeProject}` : ""}`,
+                  network.createdAt ? `  Created: ${network.createdAt}` : ""
+                ])
+        }
+      : undefined,
+    domain === "auto" || domain === "volume"
+      ? {
+          label: "Volumes",
+          count: volumes.length,
+          lines:
+            volumes.length === 0
+              ? []
+              : volumes.flatMap((volume) => [
+                  `- ${volume.name} | ${volume.driver} | ${volume.inUse ? "in use" : "unused"}${volume.anonymous ? " | anonymous" : ""}`,
+                  volume.attachedContainers && volume.attachedContainers.length > 0
+                    ? `  Attached containers: ${volume.attachedContainers.join(", ")}`
+                    : ""
+                ])
+        }
+      : undefined
+  ].filter((section): section is { label: string; count: number; lines: string[] } => Boolean(section));
+
+  const totalMatches = sections.reduce((sum, section) => sum + section.count, 0);
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker finder for "${options.query}"${domain !== "auto" ? ` (${domain})` : ""}:`,
+    ""
+  ];
+
+  if (totalMatches === 0) {
+    lines.push("- No Docker containers, projects, images, networks, or volumes matched that query.");
+    return lines.join("\n");
+  }
+
+  for (const section of sections) {
+    if (section.count === 0) {
+      continue;
+    }
+
+    lines.push(`${section.label}:`);
+    for (const line of section.lines.filter(Boolean)) {
+      lines.push(line);
+    }
+    lines.push("");
+  }
+
+  return lines.join("\n").trimEnd();
+}
+
+export function formatDockerPortMap(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    project?: string;
+    publishedOnly?: boolean;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const project = normalize(options?.project);
+  const publishedOnly = options?.publishedOnly ?? true;
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 50);
+  const containers = docker.containers
+    .filter((container) => !name || container.name.toLowerCase().includes(name) || container.image.toLowerCase().includes(name))
+    .filter((container) => !project || (container.composeProject?.toLowerCase() || "") === project)
+    .filter((container) => (publishedOnly ? Boolean(container.ports?.trim()) : true))
+    .slice(0, limit);
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.project ? `project=${options.project}` : "",
+    `publishedOnly=${publishedOnly}`
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker port map (${filters}):`,
+    ""
+  ];
+
+  if (containers.length === 0) {
+    lines.push("- No Docker containers with matching port mappings were found.");
+    return lines.join("\n");
+  }
+
+  for (const container of containers) {
+    lines.push(`- ${container.name} | ${container.image}`);
+    lines.push(`  Ports: ${container.ports || "no published ports recorded"}`);
+    if (container.composeProject || container.composeService) {
+      lines.push(
+        `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+      );
+    }
+    if (container.networks && container.networks.length > 0) {
+      lines.push(`  Networks: ${container.networks.join(", ")}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerMountReport(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    project?: string;
+    accessMode?: "ro" | "rw";
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const project = normalize(options?.project);
+  const accessMode = options?.accessMode;
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 50);
+
+  const containers = docker.containers
+    .filter((container) => !name || container.name.toLowerCase().includes(name) || container.image.toLowerCase().includes(name))
+    .filter((container) => !project || (container.composeProject?.toLowerCase() || "") === project)
+    .map((container) => {
+      const mounts = (container.mounts ?? []).filter((mount) => {
+        if (!accessMode) {
+          return true;
+        }
+
+        return accessMode === "ro" ? mount.readWrite === false : mount.readWrite === true;
+      });
+
+      return {
+        container,
+        mounts
+      };
+    })
+    .filter(({ mounts }) => mounts.length > 0)
+    .slice(0, limit);
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.project ? `project=${options.project}` : "",
+    accessMode ? `accessMode=${accessMode}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Docker mount report (${filters}):` : "Docker mount report:",
+    ""
+  ];
+
+  if (containers.length === 0) {
+    lines.push("- No Docker mounts matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const { container, mounts } of containers) {
+    lines.push(`- ${container.name} | ${container.image}`);
+    if (container.composeProject || container.composeService) {
+      lines.push(
+        `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+      );
+    }
+
+    for (const mount of mounts) {
+      const source = mount.source ? `${mount.source} -> ` : "";
+      const access = mount.readWrite === false ? "ro" : mount.readWrite === true ? "rw" : "unknown";
+      const detailBits = [mount.type, mount.mode, access]
+        .filter((value, index, values) => Boolean(value) && values.indexOf(value) === index)
+        .join(" | ");
+      lines.push(`  - ${source}${mount.destination}${detailBits ? ` | ${detailBits}` : ""}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatDockerRestartReport(
+  status: WindowsHostStatus,
+  options?: {
+    name?: string;
+    project?: string;
+    sinceHours?: number;
+    includeHealthy?: boolean;
+    limit?: number;
+  }
+) {
+  const docker = status.docker;
+  if (!docker) {
+    throw new Error("Windows host status does not include Docker details");
+  }
+
+  const name = normalize(options?.name);
+  const project = normalize(options?.project);
+  const includeHealthy = options?.includeHealthy ?? false;
+  const sinceHours = Math.min(Math.max(options?.sinceHours ?? 24 * 7, 1), 24 * 180);
+  const cutoff = Date.now() - sinceHours * 60 * 60 * 1000;
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 50);
+
+  const containers = docker.containers
+    .filter((container) => !name || container.name.toLowerCase().includes(name) || container.image.toLowerCase().includes(name))
+    .filter((container) => !project || (container.composeProject?.toLowerCase() || "") === project)
+    .filter((container) => {
+      if (includeHealthy) {
+        return true;
+      }
+
+      return (
+        (container.restartCount ?? 0) > 0 ||
+        container.state.toLowerCase() === "restarting" ||
+        (container.state.toLowerCase() === "exited" && (container.exitCode ?? 0) !== 0)
+      );
+    })
+    .map((container) => ({
+      container,
+      latestActivity: getDockerLatestActivityTimestamp(container)
+    }))
+    .filter(({ latestActivity }) => Number.isNaN(latestActivity) || latestActivity >= cutoff)
+    .sort(
+      (left, right) =>
+        (right.container.restartCount ?? 0) - (left.container.restartCount ?? 0) ||
+        right.latestActivity - left.latestActivity
+    )
+    .slice(0, limit);
+
+  const filters = [
+    options?.name ? `name=${options.name}` : "",
+    options?.project ? `project=${options.project}` : "",
+    `sinceHours=${sinceHours}`,
+    `includeHealthy=${includeHealthy}`
+  ]
+    .filter(Boolean)
+    .join(", ");
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Docker restart report (${filters}):`,
+    ""
+  ];
+
+  if (containers.length === 0) {
+    lines.push("- No Docker containers matched that restart or failure window.");
+    return lines.join("\n");
+  }
+
+  for (const { container, latestActivity } of containers) {
+    const detailBits = [
+      `state=${container.state}`,
+      container.health ? `health=${container.health}` : "",
+      container.restartCount !== undefined && container.restartCount !== null ? `restartCount=${container.restartCount}` : "",
+      container.exitCode !== undefined && container.exitCode !== null ? `exitCode=${container.exitCode}` : "",
+      Number.isFinite(latestActivity) ? `latest=${new Date(latestActivity).toISOString()}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    lines.push(`- ${container.name} | ${container.image}${detailBits ? ` | ${detailBits}` : ""}`);
+    lines.push(`  ${container.status}`);
+
+    if (container.composeProject || container.composeService) {
+      lines.push(
+        `  Compose: ${container.composeProject || "unknown project"} / ${container.composeService || "unknown service"}`
+      );
+    }
+
+    const timingBits = [
+      container.startedAt ? `started ${container.startedAt}` : "",
+      container.finishedAt ? `finished ${container.finishedAt}` : ""
+    ]
+      .filter(Boolean)
+      .join(" | ");
+    if (timingBits) {
+      lines.push(`  ${timingBits}`);
+    }
+
+    if (container.error) {
+      lines.push(`  Error: ${container.error}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
 export function formatPlexStatus(status: WindowsHostStatus) {
   const plex = status.plex;
   if (!plex) {
