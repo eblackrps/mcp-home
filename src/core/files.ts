@@ -97,17 +97,23 @@ export async function readFileCatalogSnapshot(
     return cachedCatalog.value;
   }
 
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(stripBom(raw)) as unknown;
-  assertFileCatalogSnapshot(parsed);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as unknown;
+    assertFileCatalogSnapshot(parsed);
 
-  cachedCatalog = {
-    path: fullPath,
-    mtimeMs: stat.mtimeMs,
-    value: parsed
-  };
+    cachedCatalog = {
+      path: fullPath,
+      mtimeMs: stat.mtimeMs,
+      value: parsed
+    };
 
-  return parsed;
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse file catalog snapshot at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 function scoreFile(record: IndexedFileRecord, query: string) {

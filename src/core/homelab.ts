@@ -57,10 +57,16 @@ export function getHomelabStatusPath() {
 
 export async function readHomelabStatus(statusPath = getHomelabStatusPath()): Promise<HomelabStatus> {
   const fullPath = path.resolve(statusPath);
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(raw) as unknown;
-  assertHomelabStatus(parsed);
-  return parsed;
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(raw) as unknown;
+    assertHomelabStatus(parsed);
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse homelab status at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 export function formatHomelabStatus(status: HomelabStatus, serviceFilter?: string) {

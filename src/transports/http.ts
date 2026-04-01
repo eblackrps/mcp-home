@@ -20,6 +20,9 @@ import { createServer } from "../core/tools.js";
 export async function startHttp() {
   const app = express();
   const port = Number(process.env.PORT ?? "8787");
+  if (Number.isNaN(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT value: "${process.env.PORT}". Must be an integer between 1 and 65535.`);
+  }
   const token = process.env.MCP_AUTH_TOKEN;
   const authMode = (process.env.MCP_AUTH_MODE?.trim().toLowerCase() || "bearer") as "bearer" | "oauth" | "none";
   const toolProfile = resolveToolProfile(process.env.MCP_HTTP_TOOL_PROFILE ?? process.env.MCP_TOOL_PROFILE, "public-safe");

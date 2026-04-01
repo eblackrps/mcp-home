@@ -96,17 +96,23 @@ export async function readRepoStatusSnapshot(
     return cachedRepoStatus.value;
   }
 
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(stripBom(raw)) as unknown;
-  assertRepoStatusSnapshot(parsed);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as unknown;
+    assertRepoStatusSnapshot(parsed);
 
-  cachedRepoStatus = {
-    path: fullPath,
-    mtimeMs: stat.mtimeMs,
-    value: parsed
-  };
+    cachedRepoStatus = {
+      path: fullPath,
+      mtimeMs: stat.mtimeMs,
+      value: parsed
+    };
 
-  return parsed;
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse repo status snapshot at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 function findRepoMatch(repos: RepoStatusRecord[], query: string) {

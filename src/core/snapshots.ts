@@ -249,14 +249,20 @@ async function readSnapshotStatusFile(statusPath = getSnapshotStatusPath()): Pro
     return cachedStatusFile.value;
   }
 
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(stripBom(raw)) as SnapshotStatusFile;
-  cachedStatusFile = {
-    path: fullPath,
-    mtimeMs: stat.mtimeMs,
-    value: parsed
-  };
-  return parsed;
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as SnapshotStatusFile;
+    cachedStatusFile = {
+      path: fullPath,
+      mtimeMs: stat.mtimeMs,
+      value: parsed
+    };
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse snapshot status file at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 function normalizeHistoryEntry(value: unknown): SnapshotHistoryEntry {

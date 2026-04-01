@@ -175,17 +175,23 @@ export async function readPlexActivitySnapshot(activityPath = getPlexActivityPat
     return cachedSnapshot.value;
   }
 
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(stripBom(raw)) as unknown;
-  assertSnapshot(parsed);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as unknown;
+    assertSnapshot(parsed);
 
-  cachedSnapshot = {
-    path: fullPath,
-    mtimeMs: stat.mtimeMs,
-    value: parsed
-  };
+    cachedSnapshot = {
+      path: fullPath,
+      mtimeMs: stat.mtimeMs,
+      value: parsed
+    };
 
-  return parsed;
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse Plex activity snapshot at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 export function formatPlexNowPlaying(snapshot: PlexActivitySnapshot) {

@@ -606,17 +606,23 @@ export async function readPlexLibraryIndex(indexPath = getPlexLibraryIndexPath()
     return cachedIndex.value;
   }
 
-  const raw = await fs.readFile(fullPath, "utf8");
-  const parsed = JSON.parse(stripBom(raw)) as unknown;
-  assertPlexLibraryIndex(parsed);
+  try {
+    const raw = await fs.readFile(fullPath, "utf8");
+    const parsed = JSON.parse(stripBom(raw)) as unknown;
+    assertPlexLibraryIndex(parsed);
 
-  cachedIndex = {
-    path: fullPath,
-    mtimeMs: stat.mtimeMs,
-    value: parsed
-  };
+    cachedIndex = {
+      path: fullPath,
+      mtimeMs: stat.mtimeMs,
+      value: parsed
+    };
 
-  return parsed;
+    return parsed;
+  } catch (err) {
+    throw new Error(
+      `Failed to read/parse Plex library index at ${fullPath}: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
 }
 
 export function searchPlexLibrary(index: PlexLibraryIndex, options: PlexSearchOptions) {
