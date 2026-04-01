@@ -1,6 +1,10 @@
 import type {
   ListeningPortStatus,
+  ShareStatusSnapshot,
   ScheduledTaskStatus,
+  SmbShareStatus,
+  WindowsEventEntry,
+  WindowsEventSnapshot,
   WindowsHostStatus,
   WindowsServiceStatus
 } from "./host.js";
@@ -31,6 +35,22 @@ function getListeningPorts(status: WindowsHostStatus) {
   }
 
   return status.listeningPorts;
+}
+
+function getEvents(status: WindowsHostStatus): WindowsEventSnapshot {
+  if (!status.events) {
+    throw new Error("Windows host status does not include Windows event details");
+  }
+
+  return status.events;
+}
+
+function getShares(status: WindowsHostStatus): ShareStatusSnapshot {
+  if (!status.shares) {
+    throw new Error("Windows host status does not include share details");
+  }
+
+  return status.shares;
 }
 
 function findServiceMatch(services: WindowsServiceStatus[], query: string) {
@@ -86,6 +106,81 @@ function summarizeTaskHealth(task: ScheduledTaskStatus) {
 
 function toIsoIfPresent(value: string | null | undefined) {
   return value && value !== "0001-01-01T00:00:00Z" ? value : null;
+}
+
+function normalizeEventLevel(value: string | undefined) {
+  const normalized = normalize(value);
+  if (!normalized) {
+    return undefined;
+  }
+
+  if (normalized === "warn") {
+    return "warning";
+  }
+
+  return normalized;
+}
+
+function formatEventHeadline(snapshot: WindowsEventSnapshot) {
+  return `Window: last ${snapshot.hours} hours | logs ${snapshot.logs.join(", ")} | ${snapshot.eventCount} events | critical ${snapshot.criticalCount} | errors ${snapshot.errorCount} | warnings ${snapshot.warningCount}`;
+}
+
+function formatEventLine(event: WindowsEventEntry) {
+  const provider = event.providerName ? ` | ${event.providerName}` : "";
+  return `- ${event.timeCreated} | ${event.level} | ${event.logName} | event ${event.id}${provider}`;
+}
+
+function truncate(value: string | null | undefined, maxLength = 260) {
+  if (!value) {
+    return "";
+  }
+
+  return value.length > maxLength ? `${value.slice(0, maxLength - 3)}...` : value;
+}
+
+function filterEvents(
+  snapshot: WindowsEventSnapshot,
+  options?: {
+    query?: string;
+    logName?: string;
+    source?: string;
+    level?: string;
+    limit?: number;
+  }
+) {
+  const query = normalize(options?.query);
+  const logName = normalize(options?.logName);
+  const source = normalize(options?.source);
+  const level = normalizeEventLevel(options?.level);
+  const limit = Math.min(Math.max(options?.limit ?? 30, 1), 200);
+
+  return snapshot.events
+    .filter((event) => {
+      if (logName && event.logName.toLowerCase() !== logName) {
+        return false;
+      }
+
+      if (level && event.level.toLowerCase() !== level) {
+        return false;
+      }
+
+      if (source && !(event.providerName?.toLowerCase().includes(source) ?? false)) {
+        return false;
+      }
+
+      if (
+        query &&
+        !event.logName.toLowerCase().includes(query) &&
+        !(event.providerName?.toLowerCase().includes(query) ?? false) &&
+        !String(event.id).includes(query) &&
+        !(event.message?.toLowerCase().includes(query) ?? false)
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, limit);
 }
 
 export function formatWindowsServices(
@@ -440,6 +535,233 @@ export function formatListeningPorts(
       .filter(Boolean)
       .join(" | ");
     lines.push(`- ${bits}`);
+  }
+
+  return lines.join("\n");
+}
+
+export function formatWindowsEventSummary(
+  status: WindowsHostStatus,
+  options?: {
+    logName?: string;
+    source?: string;
+    level?: string;
+    limit?: number;
+  }
+) {
+  const snapshot = getEvents(status);
+  const events = filterEvents(snapshot, {
+    logName: options?.logName,
+    source: options?.source,
+    level: options?.level,
+    limit: options?.limit
+  });
+  const filters = [
+    options?.logName ? `logName=${options.logName}` : "",
+    options?.source ? `source=${options.source}` : "",
+    options?.level ? `level=${options.level}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Windows event summary (${filters}):` : "Windows event summary:",
+    "",
+    formatEventHeadline(snapshot),
+    ""
+  ];
+
+  if (snapshot.captureError) {
+    lines.push(`Capture warning: ${snapshot.captureError}`);
+    lines.push("");
+  }
+
+  if (events.length === 0) {
+    lines.push("- No Windows events matched that filter.");
+    return lines.join("\n");
+  }
+
+  lines.push("Recent events:");
+  for (const event of events) {
+    lines.push(formatEventLine(event));
+    if (event.message) {
+      lines.push(`  ${truncate(event.message)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function searchWindowsEvents(
+  status: WindowsHostStatus,
+  options: {
+    query: string;
+    logName?: string;
+    level?: string;
+    limit?: number;
+  }
+) {
+  const snapshot = getEvents(status);
+  const query = options.query.trim();
+  if (!query) {
+    return `Generated: ${status.generatedAt}\nWindows event search:\n\n- A non-empty event query is required.`;
+  }
+
+  const events = filterEvents(snapshot, {
+    query,
+    logName: options.logName,
+    level: options.level,
+    limit: options.limit
+  });
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Windows event search for "${query}":`,
+    "",
+    formatEventHeadline(snapshot),
+    ""
+  ];
+
+  if (events.length === 0) {
+    lines.push("- No Windows events matched that query.");
+    return lines.join("\n");
+  }
+
+  for (const event of events) {
+    lines.push(formatEventLine(event));
+    if (event.message) {
+      lines.push(`  ${truncate(event.message)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+export function formatRecentServiceFailures(
+  status: WindowsHostStatus,
+  options?: {
+    hours?: number;
+    limit?: number;
+  }
+) {
+  const snapshot = getEvents(status);
+  const hours = Math.min(Math.max(options?.hours ?? snapshot.hours, 1), snapshot.hours);
+  const limit = Math.min(Math.max(options?.limit ?? 20, 1), 100);
+  const cutoff = Date.now() - hours * 60 * 60 * 1000;
+  const events = snapshot.events
+    .filter((event) => {
+      const time = Date.parse(event.timeCreated);
+      if (!Number.isFinite(time) || time < cutoff) {
+        return false;
+      }
+
+      const provider = event.providerName?.toLowerCase() ?? "";
+      const message = event.message?.toLowerCase() ?? "";
+      return (
+        provider.includes("service control manager") ||
+        provider.includes("service") ||
+        message.includes("service") ||
+        message.includes("failed to start") ||
+        message.includes("terminated unexpectedly")
+      );
+    })
+    .slice(0, limit);
+
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    `Recent service failures (last ${hours} hours):`,
+    ""
+  ];
+
+  if (events.length === 0) {
+    lines.push("- No recent service-related warnings or errors were found.");
+    return lines.join("\n");
+  }
+
+  for (const event of events) {
+    lines.push(formatEventLine(event));
+    if (event.message) {
+      lines.push(`  ${truncate(event.message)}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatShareLine(share: SmbShareStatus) {
+  const bits = [
+    share.path || "no path",
+    share.pathExists === true ? "path ok" : share.pathExists === false ? "path missing" : "",
+    share.currentUsers !== null && share.currentUsers !== undefined ? `users ${share.currentUsers}` : "",
+    share.encryptData === true ? "encrypted" : "",
+    share.continuouslyAvailable === true ? "continuous" : ""
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  return `- ${share.name}${bits ? ` | ${bits}` : ""}`;
+}
+
+export function formatShareStatus(
+  status: WindowsHostStatus,
+  options?: {
+    query?: string;
+    missingOnly?: boolean;
+    pathMissingOnly?: boolean;
+    limit?: number;
+  }
+) {
+  const snapshot = getShares(status);
+  const query = normalize(options?.query);
+  const limit = Math.min(Math.max(options?.limit ?? 30, 1), 100);
+  const shares = snapshot.shares
+    .filter((share) => {
+      if ((options?.pathMissingOnly || options?.missingOnly) && share.pathExists !== false) {
+        return false;
+      }
+
+      if (
+        query &&
+        !share.name.toLowerCase().includes(query) &&
+        !(share.path?.toLowerCase().includes(query) ?? false) &&
+        !(share.description?.toLowerCase().includes(query) ?? false)
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, limit);
+
+  const filters = [
+    options?.query ? `query=${options.query}` : "",
+    options?.pathMissingOnly || options?.missingOnly ? "missingOnly=true" : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `SMB share status (${filters}):` : "SMB share status:",
+    "",
+    `Shares: ${snapshot.shareCount} | paths missing: ${snapshot.pathMissingCount}`,
+    ""
+  ];
+
+  if (snapshot.captureError) {
+    lines.push(`Capture warning: ${snapshot.captureError}`);
+    lines.push("");
+  }
+
+  if (shares.length === 0) {
+    lines.push("- No SMB shares matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const share of shares) {
+    lines.push(formatShareLine(share));
+    if (share.description) {
+      lines.push(`  ${share.description}`);
+    }
   }
 
   return lines.join("\n");

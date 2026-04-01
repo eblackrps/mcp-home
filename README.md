@@ -15,10 +15,10 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 
 - one shared tool registry with both `stdio` and HTTP transports
 - Windows host refresh scripts for Docker Desktop, Plex, and Corsair iCUE status
-- Windows service, scheduled task, and listening-port visibility from host snapshots
-- storage, backup, endpoint-health, Tailscale, and public-exposure summaries from the same host snapshot
+- Windows service, scheduled task, event-log, SMB share, and listening-port visibility from host snapshots
+- storage, backup, backup-target, endpoint-health, internet-health, Tailscale, Home Assistant, and public-exposure summaries from the same host snapshot
 - snapshot freshness reporting, run history, and stale-data recommendations
-- natural-language entrypoints for home, host, Docker, notes, Plex, files, and repos
+- natural-language entrypoints for home, host, Docker, notes, Plex, files, repos, and guided next-check recommendations
 - a searchable exported Plex library index plus live Plex activity snapshots
 - richer Windows host telemetry for CPU, memory, disks, and network adapters
 - deeper Docker inspection for port mappings, exposure classification, mounts, restart patterns, and triage review
@@ -28,7 +28,7 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 - split tool profiles so remote HTTP can stay narrower while local stdio stays broader
 - OAuth support for ChatGPT and bearer-token support for generic remote clients
 - Docker, Caddy, and Tailscale deployment options
-- audit logging plus smoke, failure-path, and production verification scripts
+- audit logging plus smoke, failure-path, Pester, and production verification scripts
 
 ## Tool groups
 
@@ -51,6 +51,8 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `get_operations_dashboard`
   - `get_attention_report`
   - `get_daily_digest`
+  - `recommend_next_checks`
+  - `explain_issue`
   - `summarize_system_state`
 - Host and notes:
   - `ping`
@@ -64,18 +66,25 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `find_low_space_locations`
   - `list_large_folders`
   - `get_backup_status`
+  - `get_backup_target_health`
   - `find_failed_backups`
   - `check_endpoint_health`
   - `get_dns_summary`
+  - `get_internet_health`
   - `get_tailscale_status`
   - `get_public_exposure_summary`
   - `list_windows_services`
   - `get_windows_service_details`
   - `get_windows_service_issues`
+  - `get_windows_event_summary`
+  - `search_windows_events`
+  - `find_recent_service_failures`
   - `list_scheduled_tasks`
   - `get_scheduled_task_details`
   - `find_failed_tasks`
   - `list_listening_ports`
+  - `get_share_status`
+  - `get_home_assistant_status`
   - `search_files`
   - `list_recent_files`
   - `read_text_file`
@@ -98,6 +107,8 @@ For natural requests:
 - start with `find_plex` for Plex-first lookups like `Sopranos`, `Sopranos season 2`, or `Pine Barrens`
 - use `summarize_system_state` when you want one top-level host, Docker, Plex, storage, backup, and exposure rollup
 - use `get_daily_digest` when you want the shortest "what changed and what needs attention" version
+- use `recommend_next_checks` when you know the problem area but want the fastest next command shortlist
+- use `explain_issue` when you want the current snapshot signals translated into a quick operational explanation
 - use `get_snapshot_status` when results feel old or inconsistent
 - use `get_snapshot_recommendations` when you want the likely cause of stale or incomplete data
 
@@ -259,6 +270,14 @@ mcp-home/
    - `npm run smoke:stdio`
    - `npm run smoke:stdio:public-safe`
    - `npm run smoke:http`
+
+9. Run the PowerShell helper regression suite when you change the Windows refresh script:
+
+   ```powershell
+   npm run test:pester
+   ```
+
+   The repo currently ships with 50 Pester tests covering refresh-script path parsing, event helpers, backup target detection, Tailscale parsing, Docker helper logic, and Plex/git helper transforms.
 
 9. Run just the failure-path regression checks when you want to validate corrupted-snapshot handling and invalid HTTP configuration without running the whole smoke bundle:
 

@@ -1,5 +1,7 @@
 import type { HostDiskStatus, HostStorageStatus, ScannedFolderSummary, WindowsHostStatus } from "./host.js";
 
+export const NO_STORAGE_FIND_RESULTS_MESSAGE = "- No disks or scanned folders matched that query.";
+
 function normalize(value: string | undefined) {
   return value?.trim().toLowerCase();
 }
@@ -281,7 +283,7 @@ export function formatStorageFind(
   }
 
   if (diskMatches.length === 0 && folderMatches.length === 0) {
-    lines.push("- No disks or scanned folders matched that query.");
+    lines.push(NO_STORAGE_FIND_RESULTS_MESSAGE);
   }
 
   return lines.join("\n").trimEnd();

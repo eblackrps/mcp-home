@@ -1,13 +1,13 @@
-import { formatBackupFind } from "./backups.js";
+import { formatBackupFind, NO_BACKUP_FIND_RESULTS_MESSAGE } from "./backups.js";
 import { formatFileSearchResults, readFileCatalogSnapshot, searchFiles } from "./files.js";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
-import { formatDockerFind, formatHostFind, readWindowsHostStatus } from "./host.js";
-import { formatNetworkFind } from "./network.js";
+import { formatDockerFind, formatHostFind, NO_HOST_FIND_RESULTS_MESSAGE, readWindowsHostStatus } from "./host.js";
+import { formatNetworkFind, NO_NETWORK_FIND_RESULTS_MESSAGE } from "./network.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
 import { formatLocalRepos, readRepoStatusSnapshot } from "./repos.js";
-import { formatStorageFind } from "./storage.js";
+import { formatStorageFind, NO_STORAGE_FIND_RESULTS_MESSAGE } from "./storage.js";
 import { filterSnapshotOverviewForProfile, formatSnapshotHeadlineForProfile, readSnapshotOverview } from "./snapshots.js";
 import type { ToolProfile } from "./server-meta.js";
 
@@ -88,6 +88,10 @@ export async function formatAttentionReport(profile: ToolProfile) {
     ? (hostStatus.resources?.disks ?? []).filter((disk) => (disk.percentFree ?? 100) <= (hostStatus.storage?.lowSpaceThresholdPercent ?? 15))
     : [];
   const backupIssues = profile === "full" ? (hostStatus.backups?.tasks ?? []).filter((task) => task.issue !== "none") : [];
+  const backupTargetIssues = profile === "full" ? (hostStatus.backupTargets?.targets ?? []).filter((target) => target.issue !== "none") : [];
+  const eventIssues = profile === "full" ? (hostStatus.events?.criticalCount ?? 0) + (hostStatus.events?.errorCount ?? 0) : 0;
+  const shareIssues = profile === "full" ? hostStatus.shares?.pathMissingCount ?? 0 : 0;
+  const homeAssistantIssues = profile === "full" && hostStatus.homeAssistant?.configured && !hostStatus.homeAssistant.reachable ? 1 : 0;
   const unhealthyEndpoints = profile === "full" ? (hostStatus.endpointChecks ?? []).filter((endpoint) => !endpoint.healthy) : [];
   const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty) : [];
   const lines = ["Attention report:", "", formatSnapshotHeadlineForProfile(snapshotOverview, "full"), ""];
@@ -100,6 +104,10 @@ export async function formatAttentionReport(profile: ToolProfile) {
     failedTasks.length === 0 &&
     lowSpaceDisks.length === 0 &&
     backupIssues.length === 0 &&
+    backupTargetIssues.length === 0 &&
+    eventIssues === 0 &&
+    shareIssues === 0 &&
+    homeAssistantIssues === 0 &&
     unhealthyEndpoints.length === 0 &&
     dirtyRepos.length === 0
   ) {
@@ -159,6 +167,36 @@ export async function formatAttentionReport(profile: ToolProfile) {
     lines.push("");
   }
 
+  if (backupTargetIssues.length > 0) {
+    lines.push(`Backup target issues: ${backupTargetIssues.length}`);
+    for (const target of backupTargetIssues.slice(0, 10)) {
+      lines.push(`- ${target.target} | ${target.issue} | ${target.reasons.join("; ") || "issue detected"}`);
+    }
+    lines.push("");
+  }
+
+  if (eventIssues > 0) {
+    lines.push(`Windows event errors: ${eventIssues}`);
+    lines.push(`- Critical: ${hostStatus.events?.criticalCount ?? 0} | Error: ${hostStatus.events?.errorCount ?? 0}`);
+    lines.push("");
+  }
+
+  if (shareIssues > 0) {
+    lines.push(`Shares with missing paths: ${shareIssues}`);
+    for (const share of (hostStatus.shares?.shares ?? []).filter((item) => item.pathExists === false).slice(0, 10)) {
+      lines.push(`- ${share.name}${share.path ? ` | ${share.path}` : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (homeAssistantIssues > 0) {
+    lines.push("Home Assistant: configured but unreachable");
+    if (hostStatus.homeAssistant?.captureError) {
+      lines.push(`- ${hostStatus.homeAssistant.captureError}`);
+    }
+    lines.push("");
+  }
+
   if (unhealthyEndpoints.length > 0) {
     lines.push(`Unhealthy endpoint checks: ${unhealthyEndpoints.length}`);
     for (const endpoint of unhealthyEndpoints.slice(0, 10)) {
@@ -190,6 +228,18 @@ export async function formatAttentionReport(profile: ToolProfile) {
   }
   if (backupIssues.length > 0) {
     lines.push("- Use get_backup_status or find_failed_backups to inspect backup drift or failures.");
+  }
+  if (backupTargetIssues.length > 0) {
+    lines.push("- Use get_backup_target_health to inspect destination reachability and free-space issues.");
+  }
+  if (eventIssues > 0) {
+    lines.push("- Use get_windows_event_summary or search_windows_events to inspect recent event log errors.");
+  }
+  if (shareIssues > 0) {
+    lines.push("- Use get_share_status to inspect missing or misconfigured SMB share paths.");
+  }
+  if (homeAssistantIssues > 0) {
+    lines.push("- Use get_home_assistant_status to inspect the Home Assistant connection and unavailable entities.");
   }
   if (unhealthyEndpoints.length > 0) {
     lines.push("- Use check_endpoint_health or get_public_exposure_summary to inspect network reachability.");
@@ -262,6 +312,19 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
         `Backups: ${host.backups.taskCount} tasks | ${host.backups.failureCount} failures | ${host.backups.warningCount} warnings`
         );
       }
+      if (host.backupTargets) {
+        lines.push(
+        `Backup targets: ${host.backupTargets.targetCount} targets | ${host.backupTargets.failureCount} failures | ${host.backupTargets.warningCount} warnings`
+        );
+      }
+      if (host.events) {
+        lines.push(
+        `Windows events: ${host.events.eventCount} recent entries | critical ${host.events.criticalCount} | errors ${host.events.errorCount} | warnings ${host.events.warningCount}`
+        );
+      }
+      if (host.shares) {
+        lines.push(`SMB shares: ${host.shares.shareCount} | missing paths ${host.shares.pathMissingCount}`);
+      }
       if (host.endpointChecks) {
         const unhealthyEndpoints = host.endpointChecks.filter((endpoint) => !endpoint.healthy).length;
         lines.push(`Endpoints: ${host.endpointChecks.length} checks | ${unhealthyEndpoints} unhealthy`);
@@ -269,6 +332,11 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
       if (host.tailscale) {
         lines.push(
         `Tailscale: ${host.tailscale.backendState || "unknown"} | funnel ${host.tailscale.funnelEnabled ? "on" : "off"} | peers ${host.tailscale.peerCount ?? 0}`
+        );
+      }
+      if (host.homeAssistant?.configured) {
+        lines.push(
+        `Home Assistant: ${host.homeAssistant.reachable ? "reachable" : "unreachable"} | unavailable entities ${host.homeAssistant.unavailableCount ?? 0}`
         );
       }
     }
@@ -347,6 +415,35 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   if (
     profile === "full" &&
     hostResult.status === "fulfilled" &&
+    ((hostResult.value.backupTargets?.failureCount ?? 0) > 0 || (hostResult.value.backupTargets?.warningCount ?? 0) > 0)
+  ) {
+    actions.push("Review backup destination health with get_backup_target_health.");
+  }
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
+    (((hostResult.value.events?.criticalCount ?? 0) + (hostResult.value.events?.errorCount ?? 0)) > 0)
+  ) {
+    actions.push("Review recent event log errors with get_windows_event_summary.");
+  }
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
+    ((hostResult.value.shares?.pathMissingCount ?? 0) > 0)
+  ) {
+    actions.push("Review SMB path issues with get_share_status.");
+  }
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
+    hostResult.value.homeAssistant?.configured &&
+    !hostResult.value.homeAssistant.reachable
+  ) {
+    actions.push("Review Home Assistant connectivity with get_home_assistant_status.");
+  }
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
     (hostResult.value.endpointChecks?.some((endpoint) => !endpoint.healthy) ?? false)
   ) {
     actions.push("Review network reachability with check_endpoint_health.");
@@ -370,7 +467,7 @@ export async function formatHomeFind(
   notesDir: string,
   options: {
     query: string;
-    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host" | "files" | "repos" | "storage" | "backup" | "network";
+    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host" | "files" | "repos" | "storage" | "backup" | "network" | "assistant";
     limit?: number;
     profile?: ToolProfile;
   }
@@ -441,6 +538,16 @@ export async function formatHomeFind(
     lines.push(formatNetworkFind(status, { query, limit }));
     return lines.join("\n");
   }
+
+  if (area === "assistant") {
+    if (!hostAllowed) {
+      lines.push('- Home Assistant search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const status = await readWindowsHostStatus();
+    lines.push(formatHostFind(status, { query, domain: "assistant", limit }));
+    return lines.join("\n");
+   }
 
   if (area === "plex") {
     const index = await readPlexLibraryIndex();
@@ -546,26 +653,26 @@ export async function formatHomeFind(
 
   if (hostAllowed) {
     const hostText = formatHostFind(hostStatus, { query, limit });
-    if (!hostText.includes("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.")) {
+    if (!hostText.includes(NO_HOST_FIND_RESULTS_MESSAGE)) {
       lines.push("Host:");
       lines.push(hostText);
       lines.push("");
     }
   }
 
-  if (hostAllowed && storageText && !storageText.includes("- No disks or scanned folders matched that query.")) {
+  if (hostAllowed && storageText && !storageText.includes(NO_STORAGE_FIND_RESULTS_MESSAGE)) {
     lines.push("Storage:");
     lines.push(storageText);
     lines.push("");
   }
 
-  if (hostAllowed && backupText && !backupText.includes("- No backup tasks matched that query.")) {
+  if (hostAllowed && backupText && !backupText.includes(NO_BACKUP_FIND_RESULTS_MESSAGE)) {
     lines.push("Backups:");
     lines.push(backupText);
     lines.push("");
   }
 
-  if (hostAllowed && networkText && !networkText.includes("- No endpoint checks, Tailscale peers, or exposure items matched that query.")) {
+  if (hostAllowed && networkText && !networkText.includes(NO_NETWORK_FIND_RESULTS_MESSAGE)) {
     lines.push("Network:");
     lines.push(networkText);
     lines.push("");
@@ -611,6 +718,10 @@ export async function formatDailyDigest(profile: ToolProfile) {
     ? (hostStatus.resources?.disks ?? []).filter((disk) => (disk.percentFree ?? 100) <= (hostStatus.storage?.lowSpaceThresholdPercent ?? 15))
     : [];
   const backupIssues = profile === "full" ? (hostStatus.backups?.tasks ?? []).filter((task) => task.issue !== "none") : [];
+  const backupTargetIssues = profile === "full" ? (hostStatus.backupTargets?.targets ?? []).filter((target) => target.issue !== "none") : [];
+  const eventIssues = profile === "full" ? (hostStatus.events?.criticalCount ?? 0) + (hostStatus.events?.errorCount ?? 0) : 0;
+  const shareIssues = profile === "full" ? hostStatus.shares?.pathMissingCount ?? 0 : 0;
+  const homeAssistantIssues = profile === "full" && hostStatus.homeAssistant?.configured && !hostStatus.homeAssistant.reachable ? 1 : 0;
   const unhealthyEndpoints = profile === "full" ? (hostStatus.endpointChecks ?? []).filter((endpoint) => !endpoint.healthy) : [];
   const dockerProblems = hostStatus.docker?.problemCount ?? 0;
   const plexReachable = hostStatus.plex?.reachable ?? false;
@@ -625,6 +736,10 @@ export async function formatDailyDigest(profile: ToolProfile) {
     `- Snapshot freshness: ${visibleSnapshotOverview.overallFreshness}`,
     profile === "full" ? `- Low-space disks: ${lowSpaceDisks.length}` : "",
     profile === "full" ? `- Backup issues: ${backupIssues.length}` : "",
+    profile === "full" ? `- Backup target issues: ${backupTargetIssues.length}` : "",
+    profile === "full" ? `- Event errors: ${eventIssues}` : "",
+    profile === "full" ? `- Share path issues: ${shareIssues}` : "",
+    profile === "full" && hostStatus.homeAssistant?.configured ? `- Home Assistant reachable: ${hostStatus.homeAssistant.reachable ? "yes" : "no"}` : "",
     profile === "full" ? `- Unhealthy endpoints: ${unhealthyEndpoints.length}` : "",
     profile === "full" && repoSnapshot ? `- Dirty repos: ${dirtyRepos}` : ""
   ].filter(Boolean);
@@ -643,6 +758,18 @@ export async function formatDailyDigest(profile: ToolProfile) {
   }
   if (profile === "full" && backupIssues.length > 0) {
     attention.push(`${backupIssues.length} backup tasks need follow-up.`);
+  }
+  if (profile === "full" && backupTargetIssues.length > 0) {
+    attention.push(`${backupTargetIssues.length} backup targets need follow-up.`);
+  }
+  if (profile === "full" && eventIssues > 0) {
+    attention.push(`${eventIssues} Windows event errors were captured recently.`);
+  }
+  if (profile === "full" && shareIssues > 0) {
+    attention.push(`${shareIssues} SMB shares point at missing paths.`);
+  }
+  if (profile === "full" && homeAssistantIssues > 0) {
+    attention.push("Home Assistant was configured but unreachable in the latest snapshot.");
   }
   if (profile === "full" && unhealthyEndpoints.length > 0) {
     attention.push(`${unhealthyEndpoints.length} endpoint checks are unhealthy.`);
@@ -676,6 +803,18 @@ export async function formatDailyDigest(profile: ToolProfile) {
   }
   if (profile === "full" && backupIssues.length > 0) {
     actions.push("find_failed_backups");
+  }
+  if (profile === "full" && backupTargetIssues.length > 0) {
+    actions.push("get_backup_target_health");
+  }
+  if (profile === "full" && eventIssues > 0) {
+    actions.push("get_windows_event_summary");
+  }
+  if (profile === "full" && shareIssues > 0) {
+    actions.push("get_share_status");
+  }
+  if (profile === "full" && homeAssistantIssues > 0) {
+    actions.push("get_home_assistant_status");
   }
   if (profile === "full" && unhealthyEndpoints.length > 0) {
     actions.push("check_endpoint_health");

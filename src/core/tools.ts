@@ -27,11 +27,19 @@ import {
   formatHostNetworkSummary,
   formatHostResources,
   formatDockerVolumes,
+  NO_HOST_FIND_RESULTS_MESSAGE,
   formatPlexStatus,
   formatWindowsHostStatus,
   readWindowsHostStatus
 } from "./host.js";
-import { formatBackupFind, formatBackupStatus, formatFailedBackups } from "./backups.js";
+import {
+  formatBackupFind,
+  formatBackupStatus,
+  formatBackupTargetHealth,
+  formatFailedBackups,
+  NO_BACKUP_FIND_RESULTS_MESSAGE
+} from "./backups.js";
+import { formatHomeAssistantStatus } from "./home-assistant.js";
 import {
   formatAttentionReport,
   formatDailyDigest,
@@ -39,6 +47,7 @@ import {
   formatNotesFind,
   formatOperationsDashboardForProfile
 } from "./home.js";
+import { formatIssueExplanation, formatRecommendNextChecks } from "./insights.js";
 import {
   findIndexedFile,
   formatFileSearchResults,
@@ -101,7 +110,9 @@ import { auditToolCall, log, summarizeArgs } from "./logger.js";
 import {
   formatDnsSummary,
   formatEndpointHealth,
+  formatInternetHealth,
   formatNetworkFind,
+  NO_NETWORK_FIND_RESULTS_MESSAGE,
   formatPublicExposureSummary,
   formatTailscaleStatus
 } from "./network.js";
@@ -114,15 +125,25 @@ import {
 } from "./snapshots.js";
 import { formatLocalRepos, formatRecentRepoActivity, formatRepoDetails, readRepoStatusSnapshot } from "./repos.js";
 import { getRegisteredToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "./server-meta.js";
-import { formatLargeFolders, formatLowSpaceLocations, formatStorageFind, formatStorageHealth } from "./storage.js";
+import {
+  formatLargeFolders,
+  formatLowSpaceLocations,
+  formatStorageFind,
+  formatStorageHealth,
+  NO_STORAGE_FIND_RESULTS_MESSAGE
+} from "./storage.js";
 import {
   formatFailedScheduledTasks,
   formatListeningPorts,
+  formatRecentServiceFailures,
   formatScheduledTaskDetails,
   formatScheduledTasks,
+  formatShareStatus,
+  formatWindowsEventSummary,
   formatWindowsServiceDetails,
   formatWindowsServiceIssues,
-  formatWindowsServices
+  formatWindowsServices,
+  searchWindowsEvents
 } from "./windows.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
@@ -408,6 +429,24 @@ const WINDOWS_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_windows_service_issues"
   },
   {
+    name: "get_windows_event_summary",
+    summary: "Summarize recent Windows Event Viewer errors, warnings, and critical events from the host snapshot.",
+    options: ["logName", "level", "source", "limit"],
+    example: "get_windows_event_summary level=error"
+  },
+  {
+    name: "search_windows_events",
+    summary: "Search recent Windows events by message, provider, event ID, or log name.",
+    options: ["query", "logName", "level", "limit"],
+    example: "search_windows_events query=plex"
+  },
+  {
+    name: "find_recent_service_failures",
+    summary: "Highlight recent service-control-related Windows events that likely point to service startup or shutdown failures.",
+    options: ["limit"],
+    example: "find_recent_service_failures"
+  },
+  {
     name: "list_scheduled_tasks",
     summary: "List scheduled tasks with optional query, state, or enabled filters.",
     options: ["query", "state", "enabled", "limit"],
@@ -430,6 +469,12 @@ const WINDOWS_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "List listening TCP and UDP ports with process and service names.",
     options: ["query", "protocol", "port", "limit"],
     example: "list_listening_ports port=32400"
+  },
+  {
+    name: "get_share_status",
+    summary: "Summarize SMB shares and whether their backing paths exist on the Windows host.",
+    options: ["query", "missingOnly", "limit"],
+    example: "get_share_status missingOnly=true"
   }
 ];
 
@@ -460,6 +505,12 @@ const BACKUP_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_backup_status"
   },
   {
+    name: "get_backup_target_health",
+    summary: "Inspect backup destination paths, reachability, free space, and whether targets look healthy or stale.",
+    options: ["query", "issue", "limit"],
+    example: "get_backup_target_health issue=unreachable"
+  },
+  {
     name: "find_failed_backups",
     summary: "List backup-related scheduled tasks with stale runs, warnings, disabled state, or failures.",
     options: ["limit"],
@@ -473,6 +524,11 @@ const NETWORK_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Read the latest snapshot of configured endpoint checks, including local and public MCP and Plex probes.",
     options: ["query", "unhealthyOnly", "limit"],
     example: "check_endpoint_health unhealthyOnly=true"
+  },
+  {
+    name: "get_internet_health",
+    summary: "Summarize internet-facing endpoint reachability and likely local-vs-external connectivity issues.",
+    example: "get_internet_health"
   },
   {
     name: "get_dns_summary",
@@ -627,6 +683,20 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_daily_digest"
   },
   {
+    name: "recommend_next_checks",
+    group: "discovery",
+    summary: "Recommend the most relevant next MCP commands for a query or problem area.",
+    options: ["query"],
+    example: "recommend_next_checks query=backup"
+  },
+  {
+    name: "explain_issue",
+    group: "discovery",
+    summary: "Explain the current signals around an issue and point to the next commands to run.",
+    options: ["query"],
+    example: "explain_issue query=plex offline"
+  },
+  {
     name: "summarize_system_state",
     group: "snapshot",
     summary: "Natural alias for a broad operational system-state summary across the current tool profile.",
@@ -744,6 +814,12 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "List host network adapters, IP addresses, gateways, and DNS settings.",
     options: ["query", "limit"],
     example: "get_host_network_summary query=ethernet"
+  },
+  {
+    name: "get_home_assistant_status",
+    group: "assistant",
+    summary: "Read the latest Home Assistant connectivity and unavailable-entity snapshot from the Windows host.",
+    example: "get_home_assistant_status"
   },
   ...withGroup(WINDOWS_COMMAND_CATALOG, "windows"),
   ...withGroup(STORAGE_COMMAND_CATALOG, "storage"),
@@ -911,7 +987,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
     "Use this to list the major MCP commands exposed by this server, with optional area and keyword filters.",
     {
       area: z
-        .enum(["all", "discovery", "snapshot", "host", "windows", "storage", "backup", "network", "files", "repos", "docker", "plex", "notes"])
+        .enum(["all", "discovery", "snapshot", "host", "assistant", "windows", "storage", "backup", "network", "files", "repos", "docker", "plex", "notes"])
         .optional()
         .describe("Optional command group filter"),
       query: z
@@ -1235,12 +1311,64 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "recommend_next_checks",
+    "Use this to recommend the next MCP commands to run for a problem area like backups, Docker, Plex, or networking.",
+    {
+      query: z
+        .string()
+        .min(1)
+        .optional()
+        .describe("Optional issue or domain hint, for example backup, plex offline, or storage pressure")
+    },
+    async ({ query }) => {
+      return withAudit("recommend_next_checks", { query }, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatRecommendNextChecks(profile, query) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool recommend_next_checks returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to recommend next checks: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "explain_issue",
+    "Use this to summarize the current signals behind a problem description and point you to the most relevant next commands.",
+    {
+      query: z.string().min(1).describe("Issue description, for example plex offline, backup failures, or docker restart loop")
+    },
+    async ({ query }) => {
+      return withAudit("explain_issue", { query }, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatIssueExplanation(profile, query) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool explain_issue returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to explain the issue: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "find_home",
     "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, storage, backups, network, files, repos, notes, or homelab data.",
     {
       query: z.string().min(1).describe("Natural search phrase, for example Sopranos, backups, or mcp-home"),
       area: z
-        .enum(["auto", "docker", "plex", "notes", "homelab", "host", "storage", "backup", "network", "files", "repos"])
+        .enum(["auto", "docker", "plex", "notes", "homelab", "host", "assistant", "storage", "backup", "network", "files", "repos"])
         .optional()
         .describe("Optional scope if you already know the area to search"),
       limit: z.number().int().min(1).max(10).optional().describe("Maximum number of top matches to include, from 1 to 10")
@@ -1304,7 +1432,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
     {
       query: z.string().min(1).describe("Natural host query, for example memory, C:, ethernet, or corsair"),
       domain: z
-        .enum(["auto", "component", "resource", "disk", "storage", "network", "backup", "endpoint", "tailscale", "service", "task", "port"])
+        .enum(["auto", "component", "resource", "disk", "storage", "network", "backup", "endpoint", "tailscale", "service", "task", "port", "event", "share", "assistant"])
         .optional()
         .describe("Optional host scope"),
       limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matches to return, from 1 to 25")
@@ -1332,22 +1460,22 @@ export function createServer(options?: { profile?: ToolProfile }) {
           if (!domain || domain === "auto") {
             const sections: string[] = [];
             const hostText = formatHostFind(status, { query, limit });
-            if (!hostText.includes("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.")) {
+            if (!hostText.includes(NO_HOST_FIND_RESULTS_MESSAGE)) {
               sections.push(hostText);
             }
 
             const storageText = formatStorageFind(status, { query, limit });
-            if (!storageText.includes("- No disks or scanned folders matched that query.")) {
+            if (!storageText.includes(NO_STORAGE_FIND_RESULTS_MESSAGE)) {
               sections.push(storageText);
             }
 
             const backupText = formatBackupFind(status, { query, limit });
-            if (!backupText.includes("- No backup tasks matched that query.")) {
+            if (!backupText.includes(NO_BACKUP_FIND_RESULTS_MESSAGE)) {
               sections.push(backupText);
             }
 
             const networkText = formatNetworkFind(status, { query, limit });
-            if (!networkText.includes("- No endpoint checks, Tailscale peers, or exposure items matched that query.")) {
+            if (!networkText.includes(NO_NETWORK_FIND_RESULTS_MESSAGE)) {
               sections.push(networkText);
             }
 
@@ -1720,6 +1848,41 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "get_backup_target_health",
+    "Use this to inspect backup destination reachability, free space, and stale or missing backup targets from the latest host snapshot.",
+    {
+      query: z.string().min(1).optional().describe("Optional backup target path, kind, or hostname filter"),
+      issue: z
+        .enum(["none", "warning", "failure"])
+        .optional()
+        .describe("Optional backup target issue filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of backup targets to return, from 1 to 100")
+    },
+    async ({ query, issue, limit }) => {
+      return withAudit("get_backup_target_health", { query, issue, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatBackupTargetHealth(status, { query, issue, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_backup_target_health returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read backup target health: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "find_failed_backups",
     "Use this to list backup-related scheduled tasks with stale runs, warnings, disabled state, or failures.",
     {
@@ -1772,6 +1935,34 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to inspect endpoint health: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_internet_health",
+    "Use this to summarize internet-facing endpoint reachability and distinguish local-only failures from broader external issues.",
+    {},
+    async () => {
+      return withAudit("get_internet_health", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatInternetHealth(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_internet_health returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read internet health: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -1959,6 +2150,108 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "get_windows_event_summary",
+    "Use this to summarize recent Windows Event Viewer errors, warnings, and critical events from the latest host snapshot.",
+    {
+      logName: z.string().min(1).optional().describe("Optional event log name filter, for example System or Application"),
+      level: z
+        .enum(["critical", "error", "warning", "information", "verbose"])
+        .optional()
+        .describe("Optional event level filter"),
+      source: z.string().min(1).optional().describe("Optional provider or source filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of recent event entries to include, from 1 to 100")
+    },
+    async ({ logName, level, source, limit }) => {
+      return withAudit("get_windows_event_summary", { logName, level, source, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatWindowsEventSummary(status, { logName, level, source, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_windows_event_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize Windows events: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "search_windows_events",
+    "Use this to search recent Windows event entries by message text, provider, event ID, or log name.",
+    {
+      query: z.string().min(1).describe("Search term for event message, provider, or event ID"),
+      logName: z.string().min(1).optional().describe("Optional event log name filter"),
+      level: z
+        .enum(["critical", "error", "warning", "information", "verbose"])
+        .optional()
+        .describe("Optional event level filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of matching events to return, from 1 to 100")
+    },
+    async ({ query, logName, level, limit }) => {
+      return withAudit("search_windows_events", { query, logName, level, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: searchWindowsEvents(status, { query, logName, level, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool search_windows_events returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search Windows events: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_recent_service_failures",
+    "Use this to highlight recent Windows events that likely point to service start, stop, or crash failures.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of service-failure events to return, from 1 to 100")
+    },
+    async ({ limit }) => {
+      return withAudit("find_recent_service_failures", { limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatRecentServiceFailures(status, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_recent_service_failures returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect recent service failures: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "list_scheduled_tasks",
     "Use this to list Windows scheduled tasks with optional query, state, and enabled filters.",
     {
@@ -2075,6 +2368,66 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to list listening ports: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_share_status",
+    "Use this to summarize SMB shares and whether their configured backing paths exist on the Windows host.",
+    {
+      query: z.string().min(1).optional().describe("Optional share name, path, or description filter"),
+      missingOnly: z.boolean().optional().describe("Optional filter to show only shares whose backing paths are missing"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of shares to return, from 1 to 100")
+    },
+    async ({ query, missingOnly, limit }) => {
+      return withAudit("get_share_status", { query, missingOnly, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatShareStatus(status, { query, missingOnly, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_share_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read SMB share status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_home_assistant_status",
+    "Use this to inspect Home Assistant connectivity, top domains, and unavailable entities from the latest host snapshot.",
+    {},
+    async () => {
+      return withAudit("get_home_assistant_status", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatHomeAssistantStatus(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_home_assistant_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read Home Assistant status: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

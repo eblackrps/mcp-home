@@ -889,6 +889,423 @@ function Get-BackupTaskSnapshot {
   }
 }
 
+function Normalize-WindowsEventMessage {
+  param(
+    [string]$Message,
+    [int]$MaxLength = 400
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Message)) {
+    return $null
+  }
+
+  $singleLine = (($Message -replace "\s+", " ").Trim())
+  if ($singleLine.Length -le $MaxLength) {
+    return $singleLine
+  }
+
+  return $singleLine.Substring(0, $MaxLength - 3) + "..."
+}
+
+function Resolve-WindowsEventLevels {
+  param([string[]]$Levels)
+
+  $mapping = @{
+    critical = 1
+    error = 2
+    warning = 3
+    information = 4
+    informational = 4
+  }
+
+  $values = New-Object System.Collections.Generic.List[int]
+  foreach ($level in $Levels) {
+    if ([string]::IsNullOrWhiteSpace($level)) {
+      continue
+    }
+
+    $normalized = $level.Trim().ToLowerInvariant()
+    if ($mapping.ContainsKey($normalized)) {
+      $values.Add([int]$mapping[$normalized]) | Out-Null
+    }
+  }
+
+  return @($values | Select-Object -Unique)
+}
+
+function Get-WindowsEventSnapshot {
+  param(
+    [string[]]$Logs = @("System", "Application"),
+    [string[]]$Levels = @("Critical", "Error", "Warning"),
+    [int]$Hours = 48,
+    [int]$MaxEvents = 200
+  )
+
+  $entries = New-Object System.Collections.Generic.List[object]
+  $captureError = $null
+  $resolvedLevels = Resolve-WindowsEventLevels -Levels $Levels
+  $filter = @{
+    LogName = @($Logs)
+    StartTime = (Get-Date).AddHours(-1 * $Hours)
+  }
+  if ($resolvedLevels.Count -gt 0) {
+    $filter["Level"] = @($resolvedLevels)
+  }
+
+  try {
+    $events = @(Get-WinEvent -FilterHashtable $filter -MaxEvents $MaxEvents -ErrorAction Stop)
+    foreach ($event in $events) {
+      $levelName = if ($event.LevelDisplayName) { [string]$event.LevelDisplayName } else { "Unknown" }
+      $entries.Add([ordered]@{
+          logName = if ($event.LogName) { [string]$event.LogName } else { "Unknown" }
+          providerName = if ($event.ProviderName) { [string]$event.ProviderName } else { $null }
+          id = [int]$event.Id
+          level = $levelName
+          timeCreated = if ($event.TimeCreated) { $event.TimeCreated.ToUniversalTime().ToString("o") } else { Get-IsoNow }
+          machineName = if ($event.MachineName) { [string]$event.MachineName } else { $null }
+          message = Normalize-WindowsEventMessage -Message ([string]$event.Message)
+        }) | Out-Null
+    }
+  } catch {
+    $captureError = $_.Exception.Message
+  }
+
+  $eventArray = @($entries.ToArray())
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    hours = $Hours
+    logs = @($Logs)
+    levels = @($Levels)
+    eventCount = $eventArray.Count
+    criticalCount = @($eventArray | Where-Object { $_.level -eq "Critical" }).Count
+    errorCount = @($eventArray | Where-Object { $_.level -eq "Error" }).Count
+    warningCount = @($eventArray | Where-Object { $_.level -eq "Warning" }).Count
+    captureError = $captureError
+    events = $eventArray
+  }
+}
+
+function Get-SmbShareSnapshot {
+  $entries = New-Object System.Collections.Generic.List[object]
+  $captureError = $null
+
+  try {
+    $shares = @(Get-SmbShare -ErrorAction Stop | Where-Object { -not $_.Special } | Sort-Object Name)
+    foreach ($share in $shares) {
+      $path = if ($share.Path) { [string]$share.Path } else { $null }
+      $pathExists = if ([string]::IsNullOrWhiteSpace($path)) { $null } else { [bool](Test-Path -LiteralPath $path) }
+      $entries.Add([ordered]@{
+          name = [string]$share.Name
+          path = $path
+          description = if ($share.Description) { [string]$share.Description } else { $null }
+          currentUsers = if ($null -ne $share.CurrentUsers) { [int]$share.CurrentUsers } else { $null }
+          shareState = if ($share.ShareState) { [string]$share.ShareState } else { $null }
+          scopeName = if ($share.ScopeName) { [string]$share.ScopeName } else { $null }
+          folderEnumerationMode = if ($share.FolderEnumerationMode) { [string]$share.FolderEnumerationMode } else { $null }
+          cachingMode = if ($share.CachingMode) { [string]$share.CachingMode } else { $null }
+          availabilityType = if ($share.AvailabilityType) { [string]$share.AvailabilityType } else { $null }
+          continuouslyAvailable = if ($null -ne $share.ContinuouslyAvailable) { [bool]$share.ContinuouslyAvailable } else { $null }
+          encryptData = if ($null -ne $share.EncryptData) { [bool]$share.EncryptData } else { $null }
+          pathExists = $pathExists
+        }) | Out-Null
+    }
+  } catch {
+    $captureError = $_.Exception.Message
+  }
+
+  $shareArray = @($entries.ToArray())
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    shareCount = $shareArray.Count
+    pathMissingCount = @($shareArray | Where-Object { $_.pathExists -eq $false }).Count
+    captureError = $captureError
+    shares = $shareArray
+  }
+}
+
+function Normalize-BackupTargetPath {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $null
+  }
+
+  $trimmed = $Value.Trim().Trim('"', "'").Trim()
+  while ($trimmed.Length -gt 0 -and ",;".Contains($trimmed.Substring($trimmed.Length - 1, 1))) {
+    $trimmed = $trimmed.Substring(0, $trimmed.Length - 1)
+  }
+  $trimmed = $trimmed.Trim().Trim('"', "'").Trim()
+
+  if ([string]::IsNullOrWhiteSpace($trimmed)) {
+    return $null
+  }
+
+  return $trimmed
+}
+
+function Test-BackupTargetPathCandidate {
+  param([string]$Value)
+
+  if ([string]::IsNullOrWhiteSpace($Value)) {
+    return $false
+  }
+
+  $normalized = Normalize-BackupTargetPath -Value $Value
+  if ([string]::IsNullOrWhiteSpace($normalized)) {
+    return $false
+  }
+
+  if ($normalized -notmatch "^(?:[A-Za-z]:\\|\\\\)") {
+    return $false
+  }
+
+  $lower = $normalized.ToLowerInvariant()
+  return -not (
+    $lower.EndsWith(".exe") -or
+    $lower.EndsWith(".cmd") -or
+    $lower.EndsWith(".bat") -or
+    $lower.EndsWith(".ps1") -or
+    $lower.EndsWith(".psm1") -or
+    $lower.EndsWith(".dll") -or
+    $lower.EndsWith(".vbs") -or
+    $lower.EndsWith(".py") -or
+    $lower.EndsWith(".js") -or
+    $lower.EndsWith(".ts")
+  )
+}
+
+function Get-BackupTargetCandidatesFromAction {
+  param([string]$Action)
+
+  $targets = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+  if ([string]::IsNullOrWhiteSpace($Action)) {
+    return @()
+  }
+
+  foreach ($match in [regex]::Matches($Action, '"([^"]+)"|''([^'']+)''')) {
+    $candidate = if ($match.Groups[1].Success) { $match.Groups[1].Value } else { $match.Groups[2].Value }
+    if (Test-BackupTargetPathCandidate -Value $candidate) {
+      $null = $targets.Add((Normalize-BackupTargetPath -Value $candidate))
+    }
+  }
+
+  foreach ($token in ($Action -split "\s+")) {
+    if (Test-BackupTargetPathCandidate -Value $token) {
+      $null = $targets.Add((Normalize-BackupTargetPath -Value $token))
+    }
+  }
+
+  return @($targets)
+}
+
+function Get-ConfiguredBackupTargetPaths {
+  $raw = [Environment]::GetEnvironmentVariable("BACKUP_TARGET_PATHS", "Process")
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    return @()
+  }
+
+  $targets = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($item in @(
+    $raw -split "[;\r\n,]+" |
+      ForEach-Object { $_.Trim() } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+  )) {
+    $candidate = Normalize-BackupTargetPath -Value $item
+    if (-not $candidate) {
+      continue
+    }
+
+    if (-not $candidate.StartsWith("\\") -and -not [System.IO.Path]::IsPathRooted($candidate)) {
+      $candidate = Join-Path $repoRoot $candidate
+    }
+
+    $null = $targets.Add($candidate)
+  }
+
+  return @($targets)
+}
+
+function Get-BackupTargetHealthSnapshot {
+  param(
+    [object[]]$Tasks,
+    [object]$Resources,
+    [string[]]$ConfiguredTargets = @(),
+    [int]$LowSpaceThresholdPercent = 15
+  )
+
+  $targets = @{}
+
+  foreach ($configuredTarget in $ConfiguredTargets) {
+    $key = [string]$configuredTarget
+    if (-not $targets.ContainsKey($key)) {
+      $targets[$key] = [ordered]@{
+        target = $key
+        sourceKinds = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+        relatedTasks = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+      }
+    }
+    $null = $targets[$key].sourceKinds.Add("configured")
+  }
+
+  foreach ($task in $Tasks) {
+    foreach ($action in @($task.actions)) {
+      foreach ($candidate in @(Get-BackupTargetCandidatesFromAction -Action ([string]$action))) {
+        if (-not $targets.ContainsKey($candidate)) {
+          $targets[$candidate] = [ordered]@{
+            target = $candidate
+            sourceKinds = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+            relatedTasks = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+          }
+        }
+        $null = $targets[$candidate].sourceKinds.Add("task-action")
+        $null = $targets[$candidate].relatedTasks.Add(([string]$task.displayPath))
+      }
+    }
+  }
+
+  $items = New-Object System.Collections.Generic.List[object]
+  foreach ($entry in $targets.GetEnumerator()) {
+    $targetPath = [string]$entry.Value.target
+    $kind = if ($targetPath.StartsWith("\\")) { "network" } else { "local" }
+    $exists = [bool](Test-Path -LiteralPath $targetPath)
+    $drive = if ($targetPath -match "^[A-Za-z]:") { $targetPath.Substring(0, 2).ToUpperInvariant() } else { $null }
+    $disk = if ($drive -and $Resources -and $Resources.disks) { @($Resources.disks | Where-Object { $_.name -eq $drive } | Select-Object -First 1)[0] } else { $null }
+    $reachable = if ($kind -eq "network") { $exists } elseif ($disk) { $true } else { $exists }
+    $issue = "none"
+    $reasons = New-Object System.Collections.Generic.List[string]
+
+    if ($kind -eq "network" -and -not $exists) {
+      $issue = "failure"
+      $reasons.Add("network target is unreachable") | Out-Null
+    } elseif ($kind -eq "local" -and -not $exists) {
+      $issue = "warning"
+      $reasons.Add("target path does not exist") | Out-Null
+    }
+
+    if ($kind -eq "local" -and -not $disk) {
+      $issue = "failure"
+      $reasons.Add("target drive is not available") | Out-Null
+    }
+
+    if ($disk -and $null -ne $disk.percentFree -and [double]$disk.percentFree -le $LowSpaceThresholdPercent) {
+      if ($issue -eq "none") {
+        $issue = "warning"
+      }
+      $reasons.Add("target drive is low on free space") | Out-Null
+    }
+
+    $items.Add([ordered]@{
+        target = $targetPath
+        kind = $kind
+        sourceKinds = @($entry.Value.sourceKinds)
+        issue = $issue
+        exists = $exists
+        reachable = $reachable
+        drive = $drive
+        totalBytes = if ($disk) { [int64]$disk.totalBytes } else { $null }
+        freeBytes = if ($disk) { [int64]$disk.freeBytes } else { $null }
+        percentFree = if ($disk) { [double]$disk.percentFree } else { $null }
+        relatedTasks = @($entry.Value.relatedTasks | Sort-Object)
+        reasons = @($reasons)
+      }) | Out-Null
+  }
+
+  $targetArray = @($items.ToArray() | Sort-Object target)
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    targetCount = $targetArray.Count
+    healthyCount = @($targetArray | Where-Object { $_.issue -eq "none" }).Count
+    warningCount = @($targetArray | Where-Object { $_.issue -eq "warning" }).Count
+    failureCount = @($targetArray | Where-Object { $_.issue -eq "failure" }).Count
+    targets = $targetArray
+  }
+}
+
+function Get-HomeAssistantSnapshot {
+  $baseUrl = [Environment]::GetEnvironmentVariable("HOME_ASSISTANT_URL", "Process")
+  $token = [Environment]::GetEnvironmentVariable("HOME_ASSISTANT_TOKEN", "Process")
+  $checkedAt = Get-IsoNow
+
+  if ([string]::IsNullOrWhiteSpace($baseUrl)) {
+    return [ordered]@{
+      configured = $false
+      reachable = $false
+      checkedAt = $checkedAt
+      baseUrl = $null
+      version = $null
+      stateCount = $null
+      unavailableCount = $null
+      captureError = $null
+      domains = @()
+      unavailableEntities = @()
+    }
+  }
+
+  $headers = @{}
+  if (-not [string]::IsNullOrWhiteSpace($token)) {
+    $headers["Authorization"] = "Bearer $token"
+  }
+
+  try {
+    $normalizedBaseUrl = $baseUrl.TrimEnd("/")
+    $config = Invoke-RestMethod -Uri ($normalizedBaseUrl + "/api/config") -Headers $headers -TimeoutSec 8 -ErrorAction Stop
+    $states = @(Invoke-RestMethod -Uri ($normalizedBaseUrl + "/api/states") -Headers $headers -TimeoutSec 12 -ErrorAction Stop)
+    $domainGroups = $states | Group-Object { if ($_.entity_id -and $_.entity_id.Contains(".")) { $_.entity_id.Split(".")[0] } else { "unknown" } }
+    $domainSummary = @(
+      $domainGroups |
+        ForEach-Object {
+          $entities = @($_.Group)
+          [ordered]@{
+            domain = [string]$_.Name
+            entityCount = $entities.Count
+            unavailableCount = @($entities | Where-Object { $_.state -eq "unavailable" -or $_.state -eq "unknown" }).Count
+          }
+        } |
+        Sort-Object -Property @{ Expression = "entityCount"; Descending = $true }, @{ Expression = "domain"; Descending = $false }
+    )
+    $unavailableEntities = @(
+      $states |
+        Where-Object { $_.state -eq "unavailable" -or $_.state -eq "unknown" } |
+        ForEach-Object {
+          [ordered]@{
+            entityId = [string]$_.entity_id
+            domain = if ($_.entity_id -and $_.entity_id.Contains(".")) { [string]$_.entity_id.Split(".")[0] } else { "unknown" }
+            state = [string]$_.state
+            friendlyName = if ($_.attributes -and $_.attributes.friendly_name) { [string]$_.attributes.friendly_name } else { $null }
+            lastChanged = if ($_.last_changed) { [string]$_.last_changed } else { $null }
+          }
+        } |
+        Select-Object -First 25
+    )
+
+    return [ordered]@{
+      configured = $true
+      reachable = $true
+      checkedAt = $checkedAt
+      baseUrl = $normalizedBaseUrl
+      version = if ($config.version) { [string]$config.version } else { $null }
+      stateCount = @($states).Count
+      unavailableCount = @($unavailableEntities).Count
+      captureError = $null
+      domains = $domainSummary
+      unavailableEntities = $unavailableEntities
+    }
+  } catch {
+    return [ordered]@{
+      configured = $true
+      reachable = $false
+      checkedAt = $checkedAt
+      baseUrl = $baseUrl.TrimEnd("/")
+      version = $null
+      stateCount = $null
+      unavailableCount = $null
+      captureError = $_.Exception.Message
+      domains = @()
+      unavailableEntities = @()
+    }
+  }
+}
+
 function Resolve-EndpointCheckDefinitions {
   param(
     [string]$PlexLocalUrl
@@ -2204,29 +2621,30 @@ function Get-PlexActivitySnapshot {
   }
 }
 
-$refreshStartedAt = Get-IsoNow
-$refreshWarnings = New-Object System.Collections.Generic.List[string]
-$refreshErrors = New-Object System.Collections.Generic.List[string]
+function Invoke-HostRefreshMain {
+  $refreshStartedAt = Get-IsoNow
+  $refreshWarnings = New-Object System.Collections.Generic.List[string]
+  $refreshErrors = New-Object System.Collections.Generic.List[string]
 
-Acquire-RefreshLock -Path $refreshLockPath
-Write-RefreshStatus `
-  -RunState "running" `
-  -Ok $null `
-  -StartedAt $refreshStartedAt `
-  -CompletedAt $null `
-  -DurationSeconds $null `
-  -Warnings @($refreshWarnings) `
-  -Errors @($refreshErrors) `
-  -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
-  -Outputs ([ordered]@{
-      windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
-      plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
-      plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
-      fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
-      repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
-    })
+  Acquire-RefreshLock -Path $refreshLockPath
+  Write-RefreshStatus `
+    -RunState "running" `
+    -Ok $null `
+    -StartedAt $refreshStartedAt `
+    -CompletedAt $null `
+    -DurationSeconds $null `
+    -Warnings @($refreshWarnings) `
+    -Errors @($refreshErrors) `
+    -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
+    -Outputs ([ordered]@{
+        windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+        plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+        plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+        fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+        repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
+      })
 
-try {
+  try {
   $os = Get-CimInstance Win32_OperatingSystem
   $bootTime = $os.LastBootUpTime
   $uptimeSpan = (Get-Date) - $bootTime
@@ -2238,6 +2656,30 @@ try {
   $backupKeywords = Get-ConfiguredBackupKeywords
   $backupStaleHours = Get-IntegerEnvValue -Name "BACKUP_STALE_HOURS" -Default 48 -Min 1 -Max (24 * 365)
   $backupSnapshot = Get-BackupTaskSnapshot -Tasks $scheduledTasks -Keywords $backupKeywords -StaleAfterHours $backupStaleHours
+  $eventLogs = if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_EVENT_LOGS)) {
+    @(
+      $env:WINDOWS_EVENT_LOGS -split "[;\r\n,]+" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+  } else {
+    @("System", "Application")
+  }
+  $eventLevels = if (-not [string]::IsNullOrWhiteSpace($env:WINDOWS_EVENT_LEVELS)) {
+    @(
+      $env:WINDOWS_EVENT_LEVELS -split "[;\r\n,]+" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+  } else {
+    @("Critical", "Error", "Warning")
+  }
+  $eventHours = Get-IntegerEnvValue -Name "WINDOWS_EVENT_HOURS" -Default 48 -Min 1 -Max (24 * 30)
+  $eventMaxEvents = Get-IntegerEnvValue -Name "WINDOWS_EVENT_MAX_EVENTS" -Default 200 -Min 10 -Max 1000
+  $windowsEventSnapshot = Get-WindowsEventSnapshot -Logs $eventLogs -Levels $eventLevels -Hours $eventHours -MaxEvents $eventMaxEvents
+  $shareSnapshot = Get-SmbShareSnapshot
+  $backupTargetPaths = Get-ConfiguredBackupTargetPaths
+  $backupTargetSnapshot = Get-BackupTargetHealthSnapshot -Tasks $backupSnapshot.tasks -Resources $resources -ConfiguredTargets $backupTargetPaths -LowSpaceThresholdPercent $storageLowSpacePercent
 
   $fileIndexRoots = Resolve-ConfiguredPaths -RawValue $env:FILE_INDEX_ROOTS -DefaultRelativePaths @("notes")
   $rawFileExtensions = if (-not [string]::IsNullOrWhiteSpace($env:FILE_INDEX_TEXT_EXTENSIONS)) {
@@ -2388,6 +2830,7 @@ try {
   $endpointTimeoutSeconds = Get-IntegerEnvValue -Name "NETWORK_CHECK_TIMEOUT_SECONDS" -Default 5 -Min 1 -Max 30
   $endpointChecks = @(Get-EndpointHealthSnapshot -PlexLocalUrl $plexLocalUrl -TimeoutSeconds $endpointTimeoutSeconds)
   $tailscaleSnapshot = Get-TailscaleStatusSnapshot
+  $homeAssistantSnapshot = Get-HomeAssistantSnapshot
   $plexDbPath = if ($env:PLEX_DB_PATH) {
     $env:PLEX_DB_PATH
   } else {
@@ -2407,6 +2850,16 @@ try {
 
   if ([string]::IsNullOrWhiteSpace($plexToken)) {
     $refreshWarnings.Add("No Plex token was found. Continue-watching, on-deck, and history snapshots may be incomplete.") | Out-Null
+  }
+
+  if ($windowsEventSnapshot.captureError) {
+    $refreshWarnings.Add("Windows event capture was incomplete. Event-based tools may be stale or partial.") | Out-Null
+  }
+  if ($shareSnapshot.captureError) {
+    $refreshWarnings.Add("SMB share capture was incomplete. Share status may be stale or partial.") | Out-Null
+  }
+  if ($homeAssistantSnapshot.configured -and -not $homeAssistantSnapshot.reachable) {
+    $refreshWarnings.Add("Home Assistant was configured but not reachable during snapshot refresh.") | Out-Null
   }
 
   try {
@@ -2472,6 +2925,16 @@ try {
   }
 
   $plexComponent = New-Component -Name "plex" -Status $plexStatus -Details (($plexDetailsParts -join ". ") + ".")
+  $homeAssistantComponent = $null
+  if ($homeAssistantSnapshot.configured) {
+    $haStatus = if ($homeAssistantSnapshot.reachable) { "healthy" } else { "degraded" }
+    $haDetails = if ($homeAssistantSnapshot.reachable) {
+      "Reachable at $($homeAssistantSnapshot.baseUrl). Domains: $(@($homeAssistantSnapshot.domains).Count). Unavailable entities: $($homeAssistantSnapshot.unavailableCount)."
+    } else {
+      "Configured at $($homeAssistantSnapshot.baseUrl) but unreachable. $($homeAssistantSnapshot.captureError)"
+    }
+    $homeAssistantComponent = New-Component -Name "home-assistant" -Status $haStatus -Details $haDetails
+  }
   $publicExposureSnapshot = Get-PublicExposureSnapshot -TailscaleSnapshot $tailscaleSnapshot -EndpointChecks $endpointChecks -DockerContainers $dockerContainers
 
   $cpuLoadText = if ($null -ne $resources.cpu.loadPercent) { "$([Math]::Round([double]$resources.cpu.loadPercent, 1))%" } else { "unknown" }
@@ -2484,13 +2947,18 @@ try {
     $corsairComponent
     $plexComponent
   )
+  if ($homeAssistantComponent) {
+    $components += $homeAssistantComponent
+  }
 
   $healthyComponents = ($components | Where-Object { $_.status -eq "healthy" }).Count
   $degradedComponents = ($components | Where-Object { $_.status -eq "degraded" }).Count
   $lowSpaceDiskCount = @($resources.disks | Where-Object { $null -ne $_.percentFree -and $_.percentFree -le $storageLowSpacePercent }).Count
   $backupIssueCount = $backupSnapshot.warningCount + $backupSnapshot.failureCount
+  $backupTargetIssueCount = $backupTargetSnapshot.warningCount + $backupTargetSnapshot.failureCount
   $unhealthyEndpointCount = @($endpointChecks | Where-Object { -not $_.healthy }).Count
-  $summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline. Storage low-space disks: $lowSpaceDiskCount. Backup issues: $backupIssueCount. Unhealthy endpoints: $unhealthyEndpointCount."
+  $eventIssueCount = $windowsEventSnapshot.criticalCount + $windowsEventSnapshot.errorCount
+  $summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline. Storage low-space disks: $lowSpaceDiskCount. Backup issues: $backupIssueCount. Backup target issues: $backupTargetIssueCount. Event errors: $eventIssueCount. Unhealthy endpoints: $unhealthyEndpointCount."
 
   $payload = [ordered]@{
     generatedAt = Get-IsoNow
@@ -2509,9 +2977,13 @@ try {
     listeningPorts = $listeningPorts
     storage = $storageSnapshot
     backups = $backupSnapshot
+    events = $windowsEventSnapshot
+    shares = $shareSnapshot
+    backupTargets = $backupTargetSnapshot
     endpointChecks = $endpointChecks
     tailscale = $tailscaleSnapshot
     publicExposure = $publicExposureSnapshot
+    homeAssistant = $homeAssistantSnapshot
     docker = [ordered]@{
       available = ($null -ne $dockerCommand)
       cliVersion = $dockerCliVersion
@@ -2585,48 +3057,53 @@ try {
   Write-Host "Wrote file catalog snapshot to $fileCatalogPath"
   Write-Host "Wrote repo status snapshot to $repoStatusPath"
   Write-Host "Wrote snapshot status to $snapshotStatusPath"
-} catch {
-  $message = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
-  $refreshErrors.Add($message) | Out-Null
-  $completedAt = Get-IsoNow
-  $durationSeconds = (([DateTimeOffset]::Parse($completedAt)) - ([DateTimeOffset]::Parse($refreshStartedAt))).TotalSeconds
+  } catch {
+    $message = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
+    $refreshErrors.Add($message) | Out-Null
+    $completedAt = Get-IsoNow
+    $durationSeconds = (([DateTimeOffset]::Parse($completedAt)) - ([DateTimeOffset]::Parse($refreshStartedAt))).TotalSeconds
 
-  Write-RefreshStatus `
-    -RunState "failed" `
-    -Ok $false `
-    -StartedAt $refreshStartedAt `
-    -CompletedAt $completedAt `
-    -DurationSeconds $durationSeconds `
-    -Warnings @($refreshWarnings) `
-    -Errors @($refreshErrors) `
-    -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
-    -Outputs ([ordered]@{
-        windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
-        plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
-        plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
-        fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
-        repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
+    Write-RefreshStatus `
+      -RunState "failed" `
+      -Ok $false `
+      -StartedAt $refreshStartedAt `
+      -CompletedAt $completedAt `
+      -DurationSeconds $durationSeconds `
+      -Warnings @($refreshWarnings) `
+      -Errors @($refreshErrors) `
+      -Scheduler (Get-RefreshSchedulerInfo -TaskName $refreshTaskName) `
+      -Outputs ([ordered]@{
+          windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+          plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+          plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+          fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+          repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
+        })
+
+    Append-RefreshHistory -Path $snapshotHistoryPath -Entry ([ordered]@{
+        checkedAt = Get-IsoNow
+        startedAt = $refreshStartedAt
+        completedAt = $completedAt
+        runState = "failed"
+        ok = $false
+        durationSeconds = $durationSeconds
+        warnings = @($refreshWarnings)
+        errors = @($refreshErrors)
+        outputs = [ordered]@{
+          windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
+          plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
+          plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+          fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+          repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
+        }
       })
 
-  Append-RefreshHistory -Path $snapshotHistoryPath -Entry ([ordered]@{
-      checkedAt = Get-IsoNow
-      startedAt = $refreshStartedAt
-      completedAt = $completedAt
-      runState = "failed"
-      ok = $false
-      durationSeconds = $durationSeconds
-      warnings = @($refreshWarnings)
-      errors = @($refreshErrors)
-      outputs = [ordered]@{
-        windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
-        plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
-        plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
-        fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
-        repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
-      }
-    })
+    throw
+  } finally {
+    Release-RefreshLock -Path $refreshLockPath
+  }
+}
 
-  throw
-} finally {
-  Release-RefreshLock -Path $refreshLockPath
+if ($env:MCP_HOME_SKIP_REFRESH_MAIN -ne "1") {
+  Invoke-HostRefreshMain
 }

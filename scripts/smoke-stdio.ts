@@ -90,6 +90,14 @@ async function main() {
       name: "find_home",
       arguments: { query: "Sopranos", limit: 3 }
     });
+    const recommend = await client.callTool({
+      name: "recommend_next_checks",
+      arguments: { query: "backup" }
+    });
+    const explain = await client.callTool({
+      name: "explain_issue",
+      arguments: { query: "backup failures" }
+    });
 
     const plexText = getFirstText(plex.content);
     const dockerText = getFirstText(docker.content);
@@ -100,12 +108,19 @@ async function main() {
     const digestText = getFirstText(digest.content);
     const systemStateText = getFirstText(systemState.content);
     const homeText = getFirstText(home.content);
+    const recommendText = getFirstText(recommend.content);
+    const explainText = getFirstText(explain.content);
     let portText = "";
     let hostResourcesText = "";
     let dockerTriageText = "";
     let hostFindText = "";
     let attentionText = "";
     let windowsServicesText = "";
+    let windowsEventsText = "";
+    let shareStatusText = "";
+    let backupTargetText = "";
+    let internetHealthText = "";
+    let homeAssistantText = "";
     let fileSearchText = "";
     let repoStatusText = "";
     if (toolNames.includes("get_docker_port_map")) {
@@ -149,6 +164,41 @@ async function main() {
         arguments: { query: "docker", limit: 5 }
       });
       windowsServicesText = getFirstText(services.content);
+    }
+    if (toolNames.includes("get_windows_event_summary")) {
+      const windowsEvents = await client.callTool({
+        name: "get_windows_event_summary",
+        arguments: { level: "error", limit: 5 }
+      });
+      windowsEventsText = getFirstText(windowsEvents.content);
+    }
+    if (toolNames.includes("get_share_status")) {
+      const shareStatus = await client.callTool({
+        name: "get_share_status",
+        arguments: { limit: 5 }
+      });
+      shareStatusText = getFirstText(shareStatus.content);
+    }
+    if (toolNames.includes("get_backup_target_health")) {
+      const backupTarget = await client.callTool({
+        name: "get_backup_target_health",
+        arguments: { limit: 5 }
+      });
+      backupTargetText = getFirstText(backupTarget.content);
+    }
+    if (toolNames.includes("get_internet_health")) {
+      const internetHealth = await client.callTool({
+        name: "get_internet_health",
+        arguments: {}
+      });
+      internetHealthText = getFirstText(internetHealth.content);
+    }
+    if (toolNames.includes("get_home_assistant_status")) {
+      const homeAssistant = await client.callTool({
+        name: "get_home_assistant_status",
+        arguments: {}
+      });
+      homeAssistantText = getFirstText(homeAssistant.content);
     }
     if (toolNames.includes("search_files")) {
       const fileSearch = await client.callTool({
@@ -201,6 +251,22 @@ async function main() {
       throw new Error("find_home did not return the expected natural-language match");
     }
 
+    if (!recommendText.includes("Recommended next checks")) {
+      throw new Error("recommend_next_checks did not return the expected recommendation summary");
+    }
+
+    if (!explainText.includes("Issue explanation")) {
+      throw new Error("explain_issue did not return the expected issue explanation summary");
+    }
+
+    if (toolProfile === "public-safe" && !recommendText.includes("only available in the full tool profile")) {
+      throw new Error("recommend_next_checks did not enforce the public-safe profile boundary for full-only domains");
+    }
+
+    if (toolProfile === "public-safe" && !explainText.includes("only available in the full tool profile")) {
+      throw new Error("explain_issue did not enforce the public-safe profile boundary for full-only domains");
+    }
+
     if (toolNames.includes("get_docker_port_map") && !portText.toLowerCase().includes("ports")) {
       throw new Error("get_docker_port_map did not return the expected port mapping summary");
     }
@@ -223,6 +289,26 @@ async function main() {
 
     if (toolNames.includes("list_windows_services") && !windowsServicesText.includes("Windows services")) {
       throw new Error("list_windows_services did not return the expected Windows service summary");
+    }
+
+    if (toolNames.includes("get_windows_event_summary") && !windowsEventsText.includes("Windows event summary")) {
+      throw new Error("get_windows_event_summary did not return the expected Windows event summary");
+    }
+
+    if (toolNames.includes("get_share_status") && !shareStatusText.includes("SMB share status")) {
+      throw new Error("get_share_status did not return the expected SMB share summary");
+    }
+
+    if (toolNames.includes("get_backup_target_health") && !backupTargetText.includes("Backup target health")) {
+      throw new Error("get_backup_target_health did not return the expected backup target summary");
+    }
+
+    if (toolNames.includes("get_internet_health") && !internetHealthText.includes("Internet health")) {
+      throw new Error("get_internet_health did not return the expected internet health summary");
+    }
+
+    if (toolNames.includes("get_home_assistant_status") && !homeAssistantText.includes("Home Assistant status")) {
+      throw new Error("get_home_assistant_status did not return the expected Home Assistant summary");
     }
 
     if (toolNames.includes("search_files") && !fileSearchText.includes("File search")) {
@@ -248,10 +334,17 @@ async function main() {
           digestPreview: digestText.slice(0, 120),
           systemStatePreview: systemStateText.slice(0, 120),
           homePreview: homeText.slice(0, 120),
+          recommendPreview: recommendText.slice(0, 120),
+          explainPreview: explainText.slice(0, 120),
           hostResourcesPreview: hostResourcesText.slice(0, 120),
           hostFindPreview: hostFindText.slice(0, 120),
           attentionPreview: attentionText.slice(0, 120),
           windowsServicesPreview: windowsServicesText.slice(0, 120),
+          windowsEventsPreview: windowsEventsText.slice(0, 120),
+          shareStatusPreview: shareStatusText.slice(0, 120),
+          backupTargetPreview: backupTargetText.slice(0, 120),
+          internetHealthPreview: internetHealthText.slice(0, 120),
+          homeAssistantPreview: homeAssistantText.slice(0, 120),
           fileSearchPreview: fileSearchText.slice(0, 120),
           repoStatusPreview: repoStatusText.slice(0, 120),
           dockerTriagePreview: dockerTriageText.slice(0, 120),

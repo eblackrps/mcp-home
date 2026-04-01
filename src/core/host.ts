@@ -233,6 +233,76 @@ export type HostBackupStatus = {
   tasks: BackupTaskStatus[];
 };
 
+export type WindowsEventEntry = {
+  logName: string;
+  providerName?: string | null;
+  id: number;
+  level: string;
+  timeCreated: string;
+  machineName?: string | null;
+  message?: string | null;
+};
+
+export type WindowsEventSnapshot = {
+  generatedAt: string;
+  hours: number;
+  logs: string[];
+  levels: string[];
+  eventCount: number;
+  criticalCount: number;
+  errorCount: number;
+  warningCount: number;
+  captureError?: string | null;
+  events: WindowsEventEntry[];
+};
+
+export type SmbShareStatus = {
+  name: string;
+  path?: string | null;
+  description?: string | null;
+  currentUsers?: number | null;
+  shareState?: string | null;
+  scopeName?: string | null;
+  folderEnumerationMode?: string | null;
+  cachingMode?: string | null;
+  availabilityType?: string | null;
+  continuouslyAvailable?: boolean | null;
+  encryptData?: boolean | null;
+  pathExists?: boolean | null;
+};
+
+export type ShareStatusSnapshot = {
+  generatedAt: string;
+  shareCount: number;
+  pathMissingCount: number;
+  captureError?: string | null;
+  shares: SmbShareStatus[];
+};
+
+export type BackupTargetStatus = {
+  target: string;
+  kind: "local" | "network";
+  sourceKinds: string[];
+  issue: "none" | "warning" | "failure";
+  exists: boolean;
+  reachable: boolean;
+  drive?: string | null;
+  totalBytes?: number | null;
+  freeBytes?: number | null;
+  percentFree?: number | null;
+  relatedTasks: string[];
+  reasons: string[];
+};
+
+export type BackupTargetHealth = {
+  generatedAt: string;
+  targetCount: number;
+  healthyCount: number;
+  warningCount: number;
+  failureCount: number;
+  targets: BackupTargetStatus[];
+};
+
 export type EndpointHealthStatus = {
   name: string;
   url: string;
@@ -289,6 +359,33 @@ export type PublicExposureStatus = {
   exposedItems: PublicExposureItem[];
 };
 
+export type HomeAssistantDomainStatus = {
+  domain: string;
+  entityCount: number;
+  unavailableCount: number;
+};
+
+export type HomeAssistantEntityStatus = {
+  entityId: string;
+  domain: string;
+  state: string;
+  friendlyName?: string | null;
+  lastChanged?: string | null;
+};
+
+export type HomeAssistantStatus = {
+  configured: boolean;
+  reachable: boolean;
+  checkedAt: string;
+  baseUrl?: string | null;
+  version?: string | null;
+  stateCount?: number | null;
+  unavailableCount?: number | null;
+  captureError?: string | null;
+  domains?: HomeAssistantDomainStatus[];
+  unavailableEntities?: HomeAssistantEntityStatus[];
+};
+
 export type DockerStatus = {
   available: boolean;
   cliVersion?: string | null;
@@ -333,12 +430,19 @@ export type WindowsHostStatus = {
   listeningPorts?: ListeningPortStatus[];
   storage?: HostStorageStatus;
   backups?: HostBackupStatus;
+  events?: WindowsEventSnapshot;
+  shares?: ShareStatusSnapshot;
+  backupTargets?: BackupTargetHealth;
   endpointChecks?: EndpointHealthStatus[];
   tailscale?: TailscaleStatus;
   publicExposure?: PublicExposureStatus;
+  homeAssistant?: HomeAssistantStatus;
   docker?: DockerStatus;
   plex?: PlexStatus;
 };
+
+export const NO_HOST_FIND_RESULTS_MESSAGE =
+  "- No host components, resources, disks, network adapters, services, scheduled tasks, listening ports, events, shares, or Home Assistant entities matched that query.";
 
 const DEFAULT_WINDOWS_HOST_STATUS_PATH = path.resolve(
   fileURLToPath(new URL("../../data/local/windows-host-status.json", import.meta.url))
@@ -674,6 +778,120 @@ function assertHostBackupStatus(value: unknown): asserts value is HostBackupStat
   }
 }
 
+function assertWindowsEventEntry(value: unknown): asserts value is WindowsEventEntry {
+  if (!value || typeof value !== "object") {
+    throw new Error("Windows event entries must be objects");
+  }
+
+  const candidate = value as Partial<WindowsEventEntry>;
+  if (
+    typeof candidate.logName !== "string" ||
+    typeof candidate.id !== "number" ||
+    typeof candidate.level !== "string" ||
+    typeof candidate.timeCreated !== "string"
+  ) {
+    throw new Error("Windows event entries are missing required fields");
+  }
+}
+
+function assertWindowsEventSnapshot(value: unknown): asserts value is WindowsEventSnapshot {
+  if (!value || typeof value !== "object") {
+    throw new Error("Windows event snapshot must be an object");
+  }
+
+  const candidate = value as Partial<WindowsEventSnapshot>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    typeof candidate.hours !== "number" ||
+    !Array.isArray(candidate.logs) ||
+    !Array.isArray(candidate.levels) ||
+    typeof candidate.eventCount !== "number" ||
+    typeof candidate.criticalCount !== "number" ||
+    typeof candidate.errorCount !== "number" ||
+    typeof candidate.warningCount !== "number" ||
+    !Array.isArray(candidate.events)
+  ) {
+    throw new Error("Windows event snapshot is missing required fields");
+  }
+
+  for (const event of candidate.events) {
+    assertWindowsEventEntry(event);
+  }
+}
+
+function assertSmbShareStatus(value: unknown): asserts value is SmbShareStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("SMB share entries must be objects");
+  }
+
+  const candidate = value as Partial<SmbShareStatus>;
+  if (typeof candidate.name !== "string") {
+    throw new Error("SMB share entries are missing required fields");
+  }
+}
+
+function assertShareStatusSnapshot(value: unknown): asserts value is ShareStatusSnapshot {
+  if (!value || typeof value !== "object") {
+    throw new Error("Share status snapshot must be an object");
+  }
+
+  const candidate = value as Partial<ShareStatusSnapshot>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    typeof candidate.shareCount !== "number" ||
+    typeof candidate.pathMissingCount !== "number" ||
+    !Array.isArray(candidate.shares)
+  ) {
+    throw new Error("Share status snapshot is missing required fields");
+  }
+
+  for (const share of candidate.shares) {
+    assertSmbShareStatus(share);
+  }
+}
+
+function assertBackupTargetStatus(value: unknown): asserts value is BackupTargetStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Backup target entries must be objects");
+  }
+
+  const candidate = value as Partial<BackupTargetStatus>;
+  if (
+    typeof candidate.target !== "string" ||
+    (candidate.kind !== "local" && candidate.kind !== "network") ||
+    !Array.isArray(candidate.sourceKinds) ||
+    typeof candidate.issue !== "string" ||
+    typeof candidate.exists !== "boolean" ||
+    typeof candidate.reachable !== "boolean" ||
+    !Array.isArray(candidate.relatedTasks) ||
+    !Array.isArray(candidate.reasons)
+  ) {
+    throw new Error("Backup target entries are missing required fields");
+  }
+}
+
+function assertBackupTargetHealth(value: unknown): asserts value is BackupTargetHealth {
+  if (!value || typeof value !== "object") {
+    throw new Error("Backup target health must be an object");
+  }
+
+  const candidate = value as Partial<BackupTargetHealth>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    typeof candidate.targetCount !== "number" ||
+    typeof candidate.healthyCount !== "number" ||
+    typeof candidate.warningCount !== "number" ||
+    typeof candidate.failureCount !== "number" ||
+    !Array.isArray(candidate.targets)
+  ) {
+    throw new Error("Backup target health is missing required fields");
+  }
+
+  for (const target of candidate.targets) {
+    assertBackupTargetStatus(target);
+  }
+}
+
 function assertEndpointHealthStatus(value: unknown): asserts value is EndpointHealthStatus {
   if (!value || typeof value !== "object") {
     throw new Error("Endpoint health entries must be objects");
@@ -766,6 +984,71 @@ function assertPublicExposureStatus(value: unknown): asserts value is PublicExpo
 
   for (const item of candidate.exposedItems) {
     assertPublicExposureItem(item);
+  }
+}
+
+function assertHomeAssistantDomainStatus(value: unknown): asserts value is HomeAssistantDomainStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Home Assistant domain entries must be objects");
+  }
+
+  const candidate = value as Partial<HomeAssistantDomainStatus>;
+  if (
+    typeof candidate.domain !== "string" ||
+    typeof candidate.entityCount !== "number" ||
+    typeof candidate.unavailableCount !== "number"
+  ) {
+    throw new Error("Home Assistant domain entries are missing required fields");
+  }
+}
+
+function assertHomeAssistantEntityStatus(value: unknown): asserts value is HomeAssistantEntityStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Home Assistant entity entries must be objects");
+  }
+
+  const candidate = value as Partial<HomeAssistantEntityStatus>;
+  if (
+    typeof candidate.entityId !== "string" ||
+    typeof candidate.domain !== "string" ||
+    typeof candidate.state !== "string"
+  ) {
+    throw new Error("Home Assistant entity entries are missing required fields");
+  }
+}
+
+function assertHomeAssistantStatus(value: unknown): asserts value is HomeAssistantStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Home Assistant status must be an object");
+  }
+
+  const candidate = value as Partial<HomeAssistantStatus>;
+  if (
+    typeof candidate.configured !== "boolean" ||
+    typeof candidate.reachable !== "boolean" ||
+    typeof candidate.checkedAt !== "string"
+  ) {
+    throw new Error("Home Assistant status is missing required fields");
+  }
+
+  if (candidate.domains !== undefined) {
+    if (!Array.isArray(candidate.domains)) {
+      throw new Error("Home Assistant domains must be an array when present");
+    }
+
+    for (const domain of candidate.domains) {
+      assertHomeAssistantDomainStatus(domain);
+    }
+  }
+
+  if (candidate.unavailableEntities !== undefined) {
+    if (!Array.isArray(candidate.unavailableEntities)) {
+      throw new Error("Home Assistant unavailableEntities must be an array when present");
+    }
+
+    for (const entity of candidate.unavailableEntities) {
+      assertHomeAssistantEntityStatus(entity);
+    }
   }
 }
 
@@ -968,6 +1251,18 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
     assertHostBackupStatus(candidate.backups);
   }
 
+  if (candidate.events !== undefined) {
+    assertWindowsEventSnapshot(candidate.events);
+  }
+
+  if (candidate.shares !== undefined) {
+    assertShareStatusSnapshot(candidate.shares);
+  }
+
+  if (candidate.backupTargets !== undefined) {
+    assertBackupTargetHealth(candidate.backupTargets);
+  }
+
   if (candidate.endpointChecks !== undefined) {
     if (!Array.isArray(candidate.endpointChecks)) {
       throw new Error("Endpoint checks must be an array when present");
@@ -984,6 +1279,10 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
 
   if (candidate.publicExposure !== undefined) {
     assertPublicExposureStatus(candidate.publicExposure);
+  }
+
+  if (candidate.homeAssistant !== undefined) {
+    assertHomeAssistantStatus(candidate.homeAssistant);
   }
 
   if (candidate.docker !== undefined) {
@@ -3106,7 +3405,7 @@ export function formatHostFind(
   status: WindowsHostStatus,
   options: {
     query: string;
-    domain?: "auto" | "component" | "resource" | "disk" | "network" | "service" | "task" | "port";
+    domain?: "auto" | "component" | "resource" | "disk" | "network" | "service" | "task" | "port" | "event" | "share" | "assistant";
     limit?: number;
   }
 ) {
@@ -3196,6 +3495,47 @@ export function formatHostFind(
           )
           .slice(0, limit)
       : [];
+  const eventMatches =
+    domain === "auto" || domain === "event"
+      ? (status.events?.events ?? [])
+          .filter(
+            (event) =>
+              event.logName.toLowerCase().includes(query) ||
+              event.level.toLowerCase().includes(query) ||
+              (event.providerName?.toLowerCase().includes(query) ?? false) ||
+              String(event.id).includes(query) ||
+              (event.message?.toLowerCase().includes(query) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+  const shareMatches =
+    domain === "auto" || domain === "share"
+      ? (status.shares?.shares ?? [])
+          .filter(
+            (share) =>
+              share.name.toLowerCase().includes(query) ||
+              (share.path?.toLowerCase().includes(query) ?? false) ||
+              (share.description?.toLowerCase().includes(query) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+  const homeAssistantDomainMatches =
+    domain === "auto" || domain === "assistant"
+      ? (status.homeAssistant?.domains ?? [])
+          .filter((domainEntry) => domainEntry.domain.toLowerCase().includes(query))
+          .slice(0, limit)
+      : [];
+  const homeAssistantEntityMatches =
+    domain === "auto" || domain === "assistant"
+      ? (status.homeAssistant?.unavailableEntities ?? [])
+          .filter(
+            (entity) =>
+              entity.entityId.toLowerCase().includes(query) ||
+              entity.domain.toLowerCase().includes(query) ||
+              (entity.friendlyName?.toLowerCase().includes(query) ?? false)
+          )
+          .slice(0, limit)
+      : [];
 
   const includeResourceSummary = domain === "resource" || queryLooksLikeResource;
   const lines = [
@@ -3273,8 +3613,41 @@ export function formatHostFind(
     lines.push("");
   }
 
+  if (eventMatches.length > 0) {
+    lines.push("Windows events:");
+    for (const event of eventMatches) {
+      lines.push(`- ${event.timeCreated} | ${event.level} | ${event.logName} | event ${event.id}${event.providerName ? ` | ${event.providerName}` : ""}`);
+      if (event.message) {
+        lines.push(`  ${event.message}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (shareMatches.length > 0) {
+    lines.push("SMB shares:");
+    for (const share of shareMatches) {
+      lines.push(`- ${share.name}${share.path ? ` | ${share.path}` : ""}${share.pathExists === false ? " | path missing" : ""}`);
+      if (share.description) {
+        lines.push(`  ${share.description}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (homeAssistantDomainMatches.length > 0 || homeAssistantEntityMatches.length > 0) {
+    lines.push("Home Assistant:");
+    for (const domainEntry of homeAssistantDomainMatches) {
+      lines.push(`- Domain ${domainEntry.domain} | ${domainEntry.entityCount} entities | ${domainEntry.unavailableCount} unavailable`);
+    }
+    for (const entity of homeAssistantEntityMatches) {
+      lines.push(`- ${entity.entityId}${entity.friendlyName ? ` (${entity.friendlyName})` : ""} | ${entity.state}`);
+    }
+    lines.push("");
+  }
+
   if (lines.length <= 3) {
-    lines.push("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.");
+    lines.push(NO_HOST_FIND_RESULTS_MESSAGE);
   }
 
   return lines.join("\n").trimEnd();

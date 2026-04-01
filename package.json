@@ -1,6 +1,6 @@
 {
   "name": "mcp-home",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,6 +10,7 @@
     "refresh:host": "powershell -ExecutionPolicy Bypass -File scripts/refresh-windows-host.ps1",
     "schedule:host-refresh": "powershell -ExecutionPolicy Bypass -File scripts/install-host-refresh-task.ps1",
     "unschedule:host-refresh": "powershell -ExecutionPolicy Bypass -File scripts/remove-host-refresh-task.ps1",
+    "test:pester": "powershell -NoProfile -Command \"Import-Module Pester -MinimumVersion 5.0; Invoke-Pester -Path 'tests' -Output Detailed\"",
     "test:anthropic:mcp": "tsx scripts/test-anthropic-mcp.ts",
     "test:openai:mcp": "tsx scripts/test-openai-mcp.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",

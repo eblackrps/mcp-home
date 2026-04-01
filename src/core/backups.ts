@@ -1,4 +1,6 @@
-import type { BackupTaskStatus, HostBackupStatus, WindowsHostStatus } from "./host.js";
+import type { BackupTargetHealth, BackupTargetStatus, BackupTaskStatus, HostBackupStatus, WindowsHostStatus } from "./host.js";
+
+export const NO_BACKUP_FIND_RESULTS_MESSAGE = "- No backup tasks matched that query.";
 
 function normalize(value: string | undefined) {
   return value?.trim().toLowerCase();
@@ -14,6 +16,14 @@ function getBackups(status: WindowsHostStatus): HostBackupStatus {
   }
 
   return status.backups;
+}
+
+function getBackupTargets(status: WindowsHostStatus): BackupTargetHealth {
+  if (!status.backupTargets) {
+    throw new Error("Windows host status does not include backup target details");
+  }
+
+  return status.backupTargets;
 }
 
 function summarizeIssue(task: BackupTaskStatus) {
@@ -132,7 +142,7 @@ export function formatBackupFind(
   const lines = [`Generated: ${status.generatedAt}`, `Backup finder for "${options.query}":`, ""];
 
   if (matches.length === 0) {
-    lines.push("- No backup tasks matched that query.");
+    lines.push(NO_BACKUP_FIND_RESULTS_MESSAGE);
     return lines.join("\n");
   }
 
@@ -140,6 +150,110 @@ export function formatBackupFind(
     lines.push(`- ${toDisplayTask(task)} | ${summarizeIssue(task)}`);
     if (task.lastRunTime || task.nextRunTime) {
       lines.push(`  Last run: ${task.lastRunTime || "never"} | Next run: ${task.nextRunTime || "unknown"}`);
+    }
+  }
+
+  return lines.join("\n");
+}
+
+function formatByteSize(bytes: number | null | undefined) {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) {
+    return "unknown";
+  }
+
+  const units = ["B", "KB", "MB", "GB", "TB", "PB"];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  const digits = value >= 100 || unitIndex === 0 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unitIndex]}`;
+}
+
+function formatPercent(value: number | null | undefined) {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return "unknown";
+  }
+
+  return `${value.toFixed(value >= 10 ? 0 : 1)}%`;
+}
+
+function formatBackupTargetLine(target: BackupTargetStatus) {
+  const bits = [
+    target.kind,
+    target.issue !== "none" ? target.issue : "healthy",
+    target.reachable ? "reachable" : "unreachable",
+    target.percentFree !== null && target.percentFree !== undefined ? `${formatPercent(target.percentFree)} free` : "",
+    target.sourceKinds.length > 0 ? `sources=${target.sourceKinds.join(", ")}` : ""
+  ]
+    .filter(Boolean)
+    .join(" | ");
+
+  return `- ${target.target} | ${bits}`;
+}
+
+export function formatBackupTargetHealth(
+  status: WindowsHostStatus,
+  options?: {
+    query?: string;
+    issue?: BackupTargetStatus["issue"];
+    limit?: number;
+  }
+) {
+  const snapshot = getBackupTargets(status);
+  const query = normalize(options?.query);
+  const limit = Math.min(Math.max(options?.limit ?? 25, 1), 100);
+  const targets = snapshot.targets
+    .filter((target) => {
+      if (options?.issue && target.issue !== options.issue) {
+        return false;
+      }
+
+      if (
+        query &&
+        !target.target.toLowerCase().includes(query) &&
+        !target.relatedTasks.some((task) => task.toLowerCase().includes(query)) &&
+        !target.reasons.some((reason) => reason.toLowerCase().includes(query))
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .slice(0, limit);
+
+  const filters = [
+    options?.query ? `query=${options.query}` : "",
+    options?.issue ? `issue=${options.issue}` : ""
+  ]
+    .filter(Boolean)
+    .join(", ");
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    filters ? `Backup target health (${filters}):` : "Backup target health:",
+    "",
+    `Targets: ${snapshot.targetCount} | Healthy: ${snapshot.healthyCount} | Warnings: ${snapshot.warningCount} | Failures: ${snapshot.failureCount}`,
+    ""
+  ];
+
+  if (targets.length === 0) {
+    lines.push("- No backup targets matched that filter.");
+    return lines.join("\n");
+  }
+
+  for (const target of targets) {
+    lines.push(formatBackupTargetLine(target));
+    if (target.totalBytes !== null && target.totalBytes !== undefined) {
+      lines.push(`  Capacity: ${formatByteSize(target.freeBytes)} free of ${formatByteSize(target.totalBytes)} (${formatPercent(target.percentFree)})`);
+    }
+    if (target.relatedTasks.length > 0) {
+      lines.push(`  Tasks: ${target.relatedTasks.join(", ")}`);
+    }
+    if (target.reasons.length > 0) {
+      lines.push(`  Reasons: ${target.reasons.join("; ")}`);
     }
   }
 

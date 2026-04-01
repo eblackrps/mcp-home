@@ -6,6 +6,8 @@ import type {
   WindowsHostStatus
 } from "./host.js";
 
+export const NO_NETWORK_FIND_RESULTS_MESSAGE = "- No endpoint checks, Tailscale peers, or exposure items matched that query.";
+
 function normalize(value: string | undefined) {
   return value?.trim().toLowerCase();
 }
@@ -41,6 +43,15 @@ function formatEndpointLine(endpoint: EndpointHealthStatus) {
     .join(" | ");
 
   return `- ${endpoint.name} | ${bits || endpoint.url}`;
+}
+
+function isExternalUrl(value: string) {
+  try {
+    const url = new URL(value);
+    return !["localhost", "127.0.0.1", "::1"].includes(url.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function formatEndpointHealth(
@@ -289,8 +300,39 @@ export function formatNetworkFind(
   }
 
   if (lines.length <= 3) {
-    lines.push("- No endpoint checks, Tailscale peers, or exposure items matched that query.");
+    lines.push(NO_NETWORK_FIND_RESULTS_MESSAGE);
   }
 
   return lines.join("\n").trimEnd();
+}
+
+export function formatInternetHealth(status: WindowsHostStatus) {
+  const endpoints = getEndpointChecks(status).filter((endpoint) => isExternalUrl(endpoint.url));
+  const unhealthy = endpoints.filter((endpoint) => !endpoint.healthy);
+  const tailscale = status.tailscale;
+  const exposure = status.publicExposure;
+  const lines = [
+    `Generated: ${status.generatedAt}`,
+    "Internet health:",
+    "",
+    `External endpoint checks: ${endpoints.length}`,
+    `Unhealthy external checks: ${unhealthy.length}`,
+    `Tailscale funnel: ${tailscale?.funnelEnabled ? "on" : "off"}`,
+    `Tailscale serve: ${tailscale?.serveEnabled ? "on" : "off"}`,
+    `Public exposure items: ${exposure?.exposedItems.length ?? 0}`,
+    ""
+  ];
+
+  if (endpoints.length === 0) {
+    lines.push("- No external endpoint checks are configured. Add public URLs through NETWORK_ENDPOINT_CHECKS if you want internet-facing validation.");
+    return lines.join("\n");
+  }
+
+  lines.push("External checks:");
+  for (const endpoint of endpoints.slice(0, 12)) {
+    lines.push(formatEndpointLine(endpoint));
+    lines.push(`  ${endpoint.url}`);
+  }
+
+  return lines.join("\n");
 }
