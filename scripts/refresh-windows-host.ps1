@@ -729,9 +729,7 @@ function Get-StorageFolderSnapshot {
 
     $childDirectories = @(
       Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
-        Where-Object { -not (Test-ExcludedScanPath -Path $_.FullName) } |
-        Sort-Object Name |
-        Select-Object -First $ChildLimit
+        Where-Object { -not (Test-ExcludedScanPath -Path $_.FullName) }
     )
 
     if ($childDirectories.Count -eq 0) {
@@ -739,8 +737,15 @@ function Get-StorageFolderSnapshot {
       continue
     }
 
-    foreach ($directory in $childDirectories) {
-      $summaries.Add((Get-DirectoryUsage -Path $directory.FullName -Root $root -Depth 1)) | Out-Null
+    $childSummaries = @(
+      $childDirectories |
+        ForEach-Object { Get-DirectoryUsage -Path $_.FullName -Root $root -Depth 1 } |
+        Sort-Object -Property @{ Expression = "totalBytes"; Descending = $true }, @{ Expression = "path"; Descending = $false } |
+        Select-Object -First $ChildLimit
+    )
+
+    foreach ($summary in $childSummaries) {
+      $summaries.Add($summary) | Out-Null
     }
   }
 
@@ -892,24 +897,54 @@ function Resolve-EndpointCheckDefinitions {
   $definitions = New-Object System.Collections.Generic.List[object]
   $seen = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
 
+  $port = Get-IntegerEnvValue -Name "PORT" -Default 8787 -Min 1 -Max 65535
+  $localHealthUrl = [Environment]::GetEnvironmentVariable("MCP_HEALTH_URL", "Process")
+  if ([string]::IsNullOrWhiteSpace($localHealthUrl)) {
+    $candidateUrls = New-Object System.Collections.Generic.List[string]
+    foreach ($candidate in @("http://127.0.0.1:${port}/health", "http://127.0.0.1:8788/health")) {
+      if (-not $candidateUrls.Contains($candidate)) {
+        $candidateUrls.Add($candidate) | Out-Null
+      }
+    }
+
+    foreach ($candidate in $candidateUrls) {
+      try {
+        Invoke-WebRequest -UseBasicParsing -Uri $candidate -Method Get -TimeoutSec 2 -ErrorAction Stop | Out-Null
+        $localHealthUrl = $candidate
+        break
+      } catch {
+      }
+    }
+
+    if ([string]::IsNullOrWhiteSpace($localHealthUrl) -and $candidateUrls.Count -gt 0) {
+      $localHealthUrl = $candidateUrls[0]
+    }
+  }
+
+  $items = New-Object System.Collections.Generic.List[string]
+  if (-not [string]::IsNullOrWhiteSpace($localHealthUrl)) {
+    $items.Add("mcp-local=$($localHealthUrl.Trim())") | Out-Null
+  }
+  $items.Add("plex-local=${PlexLocalUrl}/identity") | Out-Null
+
+  $serverUrl = [Environment]::GetEnvironmentVariable("MCP_SERVER_URL", "Process")
+  if (-not [string]::IsNullOrWhiteSpace($serverUrl)) {
+    try {
+      $serverUri = [System.Uri]::new($serverUrl)
+      $publicHealth = [System.Uri]::new($serverUri, "/health").AbsoluteUri
+      $items.Add("mcp-public=${publicHealth}") | Out-Null
+    } catch {
+    }
+  }
+
   $raw = [Environment]::GetEnvironmentVariable("NETWORK_ENDPOINT_CHECKS", "Process")
-  $items = @()
   if (-not [string]::IsNullOrWhiteSpace($raw)) {
-    $items = @(
+    foreach ($item in @(
       $raw -split "[;\r\n]+" |
         ForEach-Object { $_.Trim() } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
-  } else {
-    $items = @("mcp-local=http://127.0.0.1:8788/health", "plex-local=${PlexLocalUrl}/identity")
-    $serverUrl = [Environment]::GetEnvironmentVariable("MCP_SERVER_URL", "Process")
-    if (-not [string]::IsNullOrWhiteSpace($serverUrl)) {
-      try {
-        $serverUri = [System.Uri]::new($serverUrl)
-        $publicHealth = [System.Uri]::new($serverUri, "/health").AbsoluteUri
-        $items += "mcp-public=${publicHealth}"
-      } catch {
-      }
+    )) {
+      $items.Add($item) | Out-Null
     }
   }
 

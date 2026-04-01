@@ -6,6 +6,7 @@ import { getWindowsHostStatusPath, readWindowsHostStatus } from "./host.js";
 import { getPlexActivityPath, readPlexActivitySnapshot } from "./plex-activity.js";
 import { getPlexLibraryIndexPath, readPlexLibraryIndex } from "./plex.js";
 import { getRepoStatusPath, readRepoStatusSnapshot } from "./repos.js";
+import type { ToolProfile } from "./server-meta.js";
 
 export type SnapshotFreshness = "fresh" | "late" | "stale" | "missing";
 export type SnapshotRunState = "unknown" | "running" | "completed" | "failed";
@@ -98,6 +99,8 @@ const DEFAULT_THRESHOLDS_MINUTES = {
   repoStatus: 90
 } as const;
 
+const PUBLIC_SAFE_SNAPSHOT_KEYS = new Set<SnapshotFileStatus["key"]>(["windowsHostStatus", "plexLibraryIndex", "plexActivity"]);
+
 let cachedStatusFile:
   | {
       path: string;
@@ -172,6 +175,10 @@ function classifyFreshness(ageMinutes: number | null | undefined, thresholdMinut
 }
 
 function summarizeOverallFreshness(files: SnapshotFileStatus[]): SnapshotFreshness {
+  if (files.length === 0) {
+    return "missing";
+  }
+
   if (files.some((file) => file.freshness === "missing")) {
     return "missing";
   }
@@ -417,6 +424,23 @@ export async function readSnapshotHistory(limit?: number): Promise<SnapshotHisto
   return normalizedLimit ? sorted.slice(0, normalizedLimit) : sorted;
 }
 
+function getVisibleSnapshotFiles(files: SnapshotFileStatus[], profile: ToolProfile) {
+  if (profile === "full") {
+    return files;
+  }
+
+  return files.filter((file) => PUBLIC_SAFE_SNAPSHOT_KEYS.has(file.key));
+}
+
+export function filterSnapshotOverviewForProfile(overview: SnapshotOverview, profile: ToolProfile): SnapshotOverview {
+  const files = getVisibleSnapshotFiles(overview.files, profile);
+  return {
+    ...overview,
+    files,
+    overallFreshness: summarizeOverallFreshness(files)
+  };
+}
+
 export function formatSnapshotHeadline(overview: SnapshotOverview) {
   const pieces = overview.files.map((file) => {
     const age = formatAgeMinutes(file.ageMinutes);
@@ -424,6 +448,10 @@ export function formatSnapshotHeadline(overview: SnapshotOverview) {
   });
 
   return `Snapshot freshness: ${overview.overallFreshness}. ${pieces.join("; ")}.`;
+}
+
+export function formatSnapshotHeadlineForProfile(overview: SnapshotOverview, profile: ToolProfile) {
+  return formatSnapshotHeadline(filterSnapshotOverviewForProfile(overview, profile));
 }
 
 function summarizeHistoryFailures(entries: SnapshotHistoryEntry[]) {
@@ -436,51 +464,53 @@ function summarizeHistoryFailures(entries: SnapshotHistoryEntry[]) {
   };
 }
 
-export function formatSnapshotStatus(overview: SnapshotOverview) {
+export function formatSnapshotStatus(overview: SnapshotOverview, profile: ToolProfile = "full") {
+  const scopedOverview = filterSnapshotOverviewForProfile(overview, profile);
   const lines = [
-    `Checked: ${overview.checkedAt}`,
-    `Overall freshness: ${overview.overallFreshness}`,
-    `Refresh run state: ${overview.refresh.runState}${overview.refresh.ok === true ? " | ok" : overview.refresh.ok === false ? " | failed" : ""}`,
+    `Checked: ${scopedOverview.checkedAt}`,
+    `Overall freshness: ${scopedOverview.overallFreshness}`,
+    `Refresh run state: ${scopedOverview.refresh.runState}${scopedOverview.refresh.ok === true ? " | ok" : scopedOverview.refresh.ok === false ? " | failed" : ""}`,
     ""
   ];
 
-  if (overview.refresh.startedAt) {
-    lines.push(`Last refresh started: ${overview.refresh.startedAt}`);
+  if (scopedOverview.refresh.startedAt) {
+    lines.push(`Last refresh started: ${scopedOverview.refresh.startedAt}`);
   }
 
-  if (overview.refresh.completedAt) {
-    lines.push(`Last refresh completed: ${overview.refresh.completedAt}`);
+  if (scopedOverview.refresh.completedAt) {
+    lines.push(`Last refresh completed: ${scopedOverview.refresh.completedAt}`);
   }
 
-  if (overview.refresh.durationSeconds !== null && overview.refresh.durationSeconds !== undefined) {
-    lines.push(`Last refresh duration: ${overview.refresh.durationSeconds.toFixed(1)} seconds`);
+  if (scopedOverview.refresh.durationSeconds !== null && scopedOverview.refresh.durationSeconds !== undefined) {
+    lines.push(`Last refresh duration: ${scopedOverview.refresh.durationSeconds.toFixed(1)} seconds`);
   }
 
   lines.push("");
   lines.push("Scheduler:");
 
-  if (!overview.scheduler.installed) {
-    lines.push("- MCP Home Host Refresh is not installed.");
+  if (!scopedOverview.scheduler.installed) {
+    lines.push(profile === "full" ? "- MCP Home Host Refresh is not installed." : "- Automatic host refresh is not installed.");
     lines.push('  Run "npm run schedule:host-refresh" on the Windows host if you want automatic refreshes.');
   } else {
     const schedulerBits = [
-      overview.scheduler.state ? `state ${overview.scheduler.state}` : "",
-      overview.scheduler.intervalMinutes ? `every ${overview.scheduler.intervalMinutes} minutes` : "",
-      overview.scheduler.nextRunTime ? `next ${overview.scheduler.nextRunTime}` : "",
-      overview.scheduler.lastRunTime ? `last ${overview.scheduler.lastRunTime}` : "",
-      overview.scheduler.lastTaskResult !== null && overview.scheduler.lastTaskResult !== undefined
-        ? `last result ${overview.scheduler.lastTaskResult}`
+      scopedOverview.scheduler.state ? `state ${scopedOverview.scheduler.state}` : "",
+      scopedOverview.scheduler.intervalMinutes ? `every ${scopedOverview.scheduler.intervalMinutes} minutes` : "",
+      scopedOverview.scheduler.nextRunTime ? `next ${scopedOverview.scheduler.nextRunTime}` : "",
+      scopedOverview.scheduler.lastRunTime ? `last ${scopedOverview.scheduler.lastRunTime}` : "",
+      scopedOverview.scheduler.lastTaskResult !== null && scopedOverview.scheduler.lastTaskResult !== undefined
+        ? `last result ${scopedOverview.scheduler.lastTaskResult}`
         : ""
     ]
       .filter(Boolean)
       .join(" | ");
-    lines.push(`- ${overview.scheduler.taskName}${schedulerBits ? ` | ${schedulerBits}` : ""}`);
+    const schedulerLabel = profile === "full" ? scopedOverview.scheduler.taskName : "Automatic host refresh";
+    lines.push(`- ${schedulerLabel}${schedulerBits ? ` | ${schedulerBits}` : ""}`);
   }
 
   lines.push("");
   lines.push("Snapshots:");
 
-  for (const file of overview.files) {
+  for (const file of scopedOverview.files) {
     const details = [
       file.freshness,
       `age ${formatAgeMinutes(file.ageMinutes)}`,
@@ -490,12 +520,15 @@ export function formatSnapshotStatus(overview: SnapshotOverview) {
       .filter(Boolean)
       .join(" | ");
     lines.push(`- ${file.label} | ${details}`);
-    lines.push(`  Path: ${file.path}`);
-
-    if (file.sourceTimestamp) {
-      lines.push(`  Source timestamp: ${file.sourceTimestamp}`);
-    } else if (file.updatedAt) {
-      lines.push(`  File updated: ${file.updatedAt}`);
+    if (profile === "full") {
+      lines.push(`  Path: ${file.path}`);
+      if (file.sourceTimestamp) {
+        lines.push(`  Source timestamp: ${file.sourceTimestamp}`);
+      } else if (file.updatedAt) {
+        lines.push(`  File updated: ${file.updatedAt}`);
+      }
+    } else if (file.sourceTimestamp || file.updatedAt) {
+      lines.push(`  Updated: ${file.sourceTimestamp || file.updatedAt}`);
     }
 
     if (file.warning) {
@@ -503,18 +536,18 @@ export function formatSnapshotStatus(overview: SnapshotOverview) {
     }
   }
 
-  if (overview.refresh.warnings.length > 0) {
+  if (scopedOverview.refresh.warnings.length > 0) {
     lines.push("");
     lines.push("Refresh warnings:");
-    for (const warning of overview.refresh.warnings) {
+    for (const warning of scopedOverview.refresh.warnings) {
       lines.push(`- ${warning}`);
     }
   }
 
-  if (overview.refresh.errors.length > 0) {
+  if (scopedOverview.refresh.errors.length > 0) {
     lines.push("");
     lines.push("Refresh errors:");
-    for (const error of overview.refresh.errors) {
+    for (const error of scopedOverview.refresh.errors) {
       lines.push(`- ${error}`);
     }
   }
@@ -565,11 +598,12 @@ export function formatSnapshotHistory(entries: SnapshotHistoryEntry[], options?:
   return lines.join("\n");
 }
 
-export function formatSnapshotRecommendations(overview: SnapshotOverview, history: SnapshotHistoryEntry[]) {
+export function formatSnapshotRecommendations(overview: SnapshotOverview, history: SnapshotHistoryEntry[], profile: ToolProfile = "full") {
+  const scopedOverview = filterSnapshotOverviewForProfile(overview, profile);
   const lines = [
     "Snapshot recommendations:",
     "",
-    formatSnapshotHeadline(overview),
+    formatSnapshotHeadline(scopedOverview),
     ""
   ];
 
@@ -577,7 +611,7 @@ export function formatSnapshotRecommendations(overview: SnapshotOverview, histor
   const likelyCauses: string[] = [];
   const recentHistory = history.slice(0, 5);
   const recentFailures = recentHistory.filter((entry) => entry.runState === "failed" || entry.ok === false);
-  const fileMap = new Map(overview.files.map((file) => [file.key, file]));
+  const fileMap = new Map(scopedOverview.files.map((file) => [file.key, file]));
   const hostFile = fileMap.get("windowsHostStatus");
   const plexIndexFile = fileMap.get("plexLibraryIndex");
   const plexActivityFile = fileMap.get("plexActivity");
@@ -586,13 +620,13 @@ export function formatSnapshotRecommendations(overview: SnapshotOverview, histor
   const warningText = overview.refresh.warnings.join(" ").toLowerCase();
   const errorText = overview.refresh.errors.join(" ").toLowerCase();
 
-  if (!overview.scheduler.installed) {
+  if (!scopedOverview.scheduler.installed) {
     recommendations.push('Install the scheduled refresh task with "npm run schedule:host-refresh" so snapshots do not depend on manual refreshes.');
-  } else if (overview.scheduler.lastTaskResult !== null && overview.scheduler.lastTaskResult !== undefined && overview.scheduler.lastTaskResult !== 0) {
+  } else if (scopedOverview.scheduler.lastTaskResult !== null && scopedOverview.scheduler.lastTaskResult !== undefined && scopedOverview.scheduler.lastTaskResult !== 0) {
     recommendations.push("The Windows scheduled task is installed but the last task result was non-zero. Inspect Task Scheduler for the latest host refresh run.");
   }
 
-  if (overview.refresh.runState === "failed" || overview.refresh.ok === false) {
+  if (scopedOverview.refresh.runState === "failed" || scopedOverview.refresh.ok === false) {
     recommendations.push('Run "npm run refresh:host" on the Windows host and inspect the reported errors before trusting stale data.');
   }
 
@@ -629,11 +663,11 @@ export function formatSnapshotRecommendations(overview: SnapshotOverview, histor
     recommendations.push("The local repo status snapshot is stale, so repo activity and dirty-state answers may be out of date.");
   }
 
-  if (overview.overallFreshness === "late") {
+  if (scopedOverview.overallFreshness === "late") {
     recommendations.push('Snapshots are late but not fully stale yet. A manual "npm run refresh:host" is worth doing if answers look old.');
   }
 
-  if (overview.overallFreshness === "fresh") {
+  if (scopedOverview.overallFreshness === "fresh") {
     recommendations.push("Snapshot freshness looks healthy right now. If answers still look wrong, compare the live tool output against the underlying host or Plex source.");
   }
 

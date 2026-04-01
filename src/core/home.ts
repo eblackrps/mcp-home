@@ -8,7 +8,7 @@ import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
 import { formatLocalRepos, readRepoStatusSnapshot } from "./repos.js";
 import { formatStorageFind } from "./storage.js";
-import { formatSnapshotHeadline, readSnapshotOverview } from "./snapshots.js";
+import { filterSnapshotOverviewForProfile, formatSnapshotHeadlineForProfile, readSnapshotOverview } from "./snapshots.js";
 import type { ToolProfile } from "./server-meta.js";
 
 function normalize(value: string | undefined) {
@@ -90,7 +90,7 @@ export async function formatAttentionReport(profile: ToolProfile) {
   const backupIssues = profile === "full" ? (hostStatus.backups?.tasks ?? []).filter((task) => task.issue !== "none") : [];
   const unhealthyEndpoints = profile === "full" ? (hostStatus.endpointChecks ?? []).filter((endpoint) => !endpoint.healthy) : [];
   const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty) : [];
-  const lines = ["Attention report:", "", formatSnapshotHeadline(snapshotOverview), ""];
+  const lines = ["Attention report:", "", formatSnapshotHeadlineForProfile(snapshotOverview, "full"), ""];
 
   if (
     staleSnapshots.length === 0 &&
@@ -207,6 +207,7 @@ export async function formatAttentionReport(profile: ToolProfile) {
 export async function formatOperationsDashboardForProfile(notesDir: string, profile: ToolProfile) {
   const checkedAt = new Date().toISOString();
   const snapshotOverview = await readSnapshotOverview();
+  const visibleSnapshotOverview = filterSnapshotOverviewForProfile(snapshotOverview, profile);
   const [hostResult, activityResult, notesResult, homelabResult, fileResult, repoResult] = await Promise.allSettled([
     readWindowsHostStatus(),
     readPlexActivitySnapshot(),
@@ -218,7 +219,7 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
 
   const lines = [
     `Checked: ${checkedAt}`,
-    formatSnapshotHeadline(snapshotOverview),
+    formatSnapshotHeadlineForProfile(snapshotOverview, profile),
     ""
   ];
 
@@ -231,7 +232,8 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
     ]
       .filter(Boolean)
       .join(" | ");
-    lines.push(`Scheduler: ${snapshotOverview.scheduler.taskName}${schedulerBits ? ` | ${schedulerBits}` : ""}`);
+    const schedulerLabel = profile === "full" ? snapshotOverview.scheduler.taskName : "Automatic refresh";
+    lines.push(`Scheduler: ${schedulerLabel}${schedulerBits ? ` | ${schedulerBits}` : ""}`);
   } else {
     lines.push('Scheduler: not installed. Run "npm run schedule:host-refresh" on the Windows host for automatic refreshes.');
   }
@@ -242,35 +244,33 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
     const host = hostResult.value;
     if (profile === "full") {
       lines.push(`Host: ${host.host.computerName} | ${host.summary}`);
-    } else {
-      lines.push(`Host summary: ${host.summary}`);
-    }
-    if (host.resources) {
-      lines.push(
-        `Host resources: CPU ${host.resources.cpu.loadPercent ?? "unknown"}% | RAM ${Math.round(host.resources.memory.percentUsed)}% used | ${host.resources.disks.length} disks | ${host.resources.network.adapterCount} adapters`
-      );
-    }
-    if (profile === "full" && host.storage) {
-      const lowSpaceDisks = (host.resources?.disks ?? []).filter(
+      if (host.resources) {
+        lines.push(
+          `Host resources: CPU ${host.resources.cpu.loadPercent ?? "unknown"}% | RAM ${Math.round(host.resources.memory.percentUsed)}% used | ${host.resources.disks.length} disks | ${host.resources.network.adapterCount} adapters`
+        );
+      }
+      if (host.storage) {
+        const lowSpaceDisks = (host.resources?.disks ?? []).filter(
         (disk) => (disk.percentFree ?? 100) <= host.storage!.lowSpaceThresholdPercent
-      );
-      lines.push(
+        );
+        lines.push(
         `Storage: ${host.storage.scannedFolders.length} scanned folders | ${lowSpaceDisks.length} low-space disks at or below ${host.storage.lowSpaceThresholdPercent}% free`
-      );
-    }
-    if (profile === "full" && host.backups) {
-      lines.push(
+        );
+      }
+      if (host.backups) {
+        lines.push(
         `Backups: ${host.backups.taskCount} tasks | ${host.backups.failureCount} failures | ${host.backups.warningCount} warnings`
-      );
-    }
-    if (profile === "full" && host.endpointChecks) {
-      const unhealthyEndpoints = host.endpointChecks.filter((endpoint) => !endpoint.healthy).length;
-      lines.push(`Endpoints: ${host.endpointChecks.length} checks | ${unhealthyEndpoints} unhealthy`);
-    }
-    if (profile === "full" && host.tailscale) {
-      lines.push(
+        );
+      }
+      if (host.endpointChecks) {
+        const unhealthyEndpoints = host.endpointChecks.filter((endpoint) => !endpoint.healthy).length;
+        lines.push(`Endpoints: ${host.endpointChecks.length} checks | ${unhealthyEndpoints} unhealthy`);
+      }
+      if (host.tailscale) {
+        lines.push(
         `Tailscale: ${host.tailscale.backendState || "unknown"} | funnel ${host.tailscale.funnelEnabled ? "on" : "off"} | peers ${host.tailscale.peerCount ?? 0}`
-      );
+        );
+      }
     }
     if (host.docker) {
       lines.push(
@@ -327,7 +327,7 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   }
 
   const actions: string[] = [];
-  if (snapshotOverview.overallFreshness !== "fresh") {
+  if (visibleSnapshotOverview.overallFreshness !== "fresh") {
     actions.push('Refresh snapshots with "npm run refresh:host" if these answers look old.');
     actions.push("Use get_snapshot_recommendations to see the likely cause of the stale data.");
   }
@@ -337,13 +337,21 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   if (hostResult.status === "fulfilled" && (hostResult.value.docker?.problemCount ?? 0) > 0) {
     actions.push("Review Docker issues with get_docker_issues or get_docker_restart_report.");
   }
-  if (hostResult.status === "fulfilled" && ((hostResult.value.backups?.failureCount ?? 0) > 0 || (hostResult.value.backups?.warningCount ?? 0) > 0)) {
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
+    ((hostResult.value.backups?.failureCount ?? 0) > 0 || (hostResult.value.backups?.warningCount ?? 0) > 0)
+  ) {
     actions.push("Review backup drift with get_backup_status or find_failed_backups.");
   }
-  if (hostResult.status === "fulfilled" && (hostResult.value.endpointChecks?.some((endpoint) => !endpoint.healthy) ?? false)) {
+  if (
+    profile === "full" &&
+    hostResult.status === "fulfilled" &&
+    (hostResult.value.endpointChecks?.some((endpoint) => !endpoint.healthy) ?? false)
+  ) {
     actions.push("Review network reachability with check_endpoint_health.");
   }
-  if (repoResult.status === "fulfilled" && repoResult.value.repos.some((repo) => repo.dirty)) {
+  if (profile === "full" && repoResult.status === "fulfilled" && repoResult.value.repos.some((repo) => repo.dirty)) {
     actions.push("Use list_local_repos or get_repo_status to review dirty repositories.");
   }
 
@@ -384,7 +392,7 @@ export async function formatHomeFind(
   const snapshotOverview = await readSnapshotOverview();
   const lines = [
     `Home finder for "${query}"${area !== "auto" ? ` (${area})` : ""}:`,
-    formatSnapshotHeadline(snapshotOverview),
+    formatSnapshotHeadlineForProfile(snapshotOverview, profile),
     ""
   ];
 
@@ -596,6 +604,7 @@ export async function formatHomeFind(
 
 export async function formatDailyDigest(profile: ToolProfile) {
   const [snapshotOverview, hostStatus] = await Promise.all([readSnapshotOverview(), readWindowsHostStatus()]);
+  const visibleSnapshotOverview = filterSnapshotOverviewForProfile(snapshotOverview, profile);
   const repoSnapshot = profile === "full" ? await readRepoStatusSnapshot().catch(() => null) : null;
   const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty).length : 0;
   const lowSpaceDisks = profile === "full"
@@ -608,12 +617,12 @@ export async function formatDailyDigest(profile: ToolProfile) {
   const lines = [
     `Daily digest: ${new Date().toISOString()}`,
     "",
-    formatSnapshotHeadline(snapshotOverview),
+    formatSnapshotHeadlineForProfile(snapshotOverview, profile),
     "",
     "Headline:",
     `- Docker problems: ${dockerProblems}`,
     `- Plex reachable: ${plexReachable ? "yes" : "no"}`,
-    `- Snapshot freshness: ${snapshotOverview.overallFreshness}`,
+    `- Snapshot freshness: ${visibleSnapshotOverview.overallFreshness}`,
     profile === "full" ? `- Low-space disks: ${lowSpaceDisks.length}` : "",
     profile === "full" ? `- Backup issues: ${backupIssues.length}` : "",
     profile === "full" ? `- Unhealthy endpoints: ${unhealthyEndpoints.length}` : "",
@@ -623,7 +632,7 @@ export async function formatDailyDigest(profile: ToolProfile) {
   lines.push("");
   lines.push("What needs attention:");
   const attention: string[] = [];
-  if (snapshotOverview.overallFreshness !== "fresh") {
+  if (visibleSnapshotOverview.overallFreshness !== "fresh") {
     attention.push("Snapshot data is not fully fresh.");
   }
   if (dockerProblems > 0) {
@@ -656,7 +665,7 @@ export async function formatDailyDigest(profile: ToolProfile) {
   lines.push("");
   lines.push("Recommended next checks:");
   const actions: string[] = [];
-  if (snapshotOverview.overallFreshness !== "fresh") {
+  if (visibleSnapshotOverview.overallFreshness !== "fresh") {
     actions.push("get_snapshot_recommendations");
   }
   if (dockerProblems > 0) {

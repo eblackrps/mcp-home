@@ -1083,7 +1083,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
         try {
           const overview = await readSnapshotOverview();
           return {
-            content: [{ type: "text", text: formatSnapshotStatus(overview) }]
+            content: [{ type: "text", text: formatSnapshotStatus(overview, profile) }]
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";
@@ -1131,7 +1131,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
         try {
           const [overview, history] = await Promise.all([readSnapshotOverview(), readSnapshotHistory(10)]);
           return {
-            content: [{ type: "text", text: formatSnapshotRecommendations(overview, history) }]
+            content: [{ type: "text", text: formatSnapshotRecommendations(overview, history, profile) }]
           };
         } catch (error) {
           const message = error instanceof Error ? error.message : "Unknown error";

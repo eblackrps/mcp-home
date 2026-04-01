@@ -493,9 +493,9 @@ Notes:
 
 - `STORAGE_SCAN_ROOTS` controls which folders are scanned for the large-folder and low-space reports.
 - `BACKUP_TASK_KEYWORDS` controls which scheduled tasks count as backup-related.
-- `NETWORK_ENDPOINT_CHECKS` lets you define extra endpoint probes in the refresh step. Leave it blank to keep the built-in defaults.
+- `NETWORK_ENDPOINT_CHECKS` adds extra endpoint probes in the refresh step. Leave it blank to keep only the built-in defaults.
 - `TAILSCALE_EXE` is only needed if Tailscale is installed somewhere non-standard on Windows.
-- `MCP_HEALTH_URL` is optional and only affects the smoke-test target selection.
+- `MCP_HEALTH_URL` is optional and pins the preferred local MCP health target for both the host refresh and the smoke-test target selection.
 
 ## Model API checks
 
