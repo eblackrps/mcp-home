@@ -78,6 +78,14 @@ async function main() {
       name: "get_operations_dashboard",
       arguments: {}
     });
+    const digest = await client.callTool({
+      name: "get_daily_digest",
+      arguments: {}
+    });
+    const systemState = await client.callTool({
+      name: "summarize_system_state",
+      arguments: {}
+    });
     const home = await client.callTool({
       name: "find_home",
       arguments: { query: "Sopranos", limit: 3 }
@@ -89,6 +97,8 @@ async function main() {
     const snapshotHistoryText = getFirstText(snapshotHistory.content);
     const snapshotRecommendationsText = getFirstText(snapshotRecommendations.content);
     const dashboardText = getFirstText(dashboard.content);
+    const digestText = getFirstText(digest.content);
+    const systemStateText = getFirstText(systemState.content);
     const homeText = getFirstText(home.content);
     let portText = "";
     let hostResourcesText = "";
@@ -179,6 +189,14 @@ async function main() {
       throw new Error("get_operations_dashboard did not return the expected dashboard summary");
     }
 
+    if (!digestText.includes("Daily digest")) {
+      throw new Error("get_daily_digest did not return the expected daily digest summary");
+    }
+
+    if (!systemStateText.includes("System state summary")) {
+      throw new Error("summarize_system_state did not return the expected system state summary");
+    }
+
     if (!homeText.toLowerCase().includes("sopranos")) {
       throw new Error("find_home did not return the expected natural-language match");
     }
@@ -227,6 +245,8 @@ async function main() {
           snapshotHistoryPreview: snapshotHistoryText.slice(0, 120),
           snapshotRecommendationsPreview: snapshotRecommendationsText.slice(0, 120),
           dashboardPreview: dashboardText.slice(0, 120),
+          digestPreview: digestText.slice(0, 120),
+          systemStatePreview: systemStateText.slice(0, 120),
           homePreview: homeText.slice(0, 120),
           hostResourcesPreview: hostResourcesText.slice(0, 120),
           hostFindPreview: hostFindText.slice(0, 120),

@@ -31,7 +31,14 @@ import {
   formatWindowsHostStatus,
   readWindowsHostStatus
 } from "./host.js";
-import { formatAttentionReport, formatHomeFind, formatNotesFind, formatOperationsDashboardForProfile } from "./home.js";
+import { formatBackupFind, formatBackupStatus, formatFailedBackups } from "./backups.js";
+import {
+  formatAttentionReport,
+  formatDailyDigest,
+  formatHomeFind,
+  formatNotesFind,
+  formatOperationsDashboardForProfile
+} from "./home.js";
 import {
   findIndexedFile,
   formatFileSearchResults,
@@ -92,6 +99,13 @@ import {
 } from "./plex-activity.js";
 import { auditToolCall, log, summarizeArgs } from "./logger.js";
 import {
+  formatDnsSummary,
+  formatEndpointHealth,
+  formatNetworkFind,
+  formatPublicExposureSummary,
+  formatTailscaleStatus
+} from "./network.js";
+import {
   formatSnapshotHistory,
   formatSnapshotRecommendations,
   formatSnapshotStatus,
@@ -100,6 +114,7 @@ import {
 } from "./snapshots.js";
 import { formatLocalRepos, formatRecentRepoActivity, formatRepoDetails, readRepoStatusSnapshot } from "./repos.js";
 import { getRegisteredToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "./server-meta.js";
+import { formatLargeFolders, formatLowSpaceLocations, formatStorageFind, formatStorageHealth } from "./storage.js";
 import {
   formatFailedScheduledTasks,
   formatListeningPorts,
@@ -418,6 +433,64 @@ const WINDOWS_COMMAND_CATALOG: CommandCatalogEntry[] = [
   }
 ];
 
+const STORAGE_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "get_storage_health",
+    summary: "Summarize disk free space plus the largest scanned folders from the latest storage snapshot.",
+    example: "get_storage_health"
+  },
+  {
+    name: "find_low_space_locations",
+    summary: "List disks below the free-space threshold and show the biggest scanned folders on those drives.",
+    options: ["thresholdPercent", "limit"],
+    example: "find_low_space_locations thresholdPercent=15"
+  },
+  {
+    name: "list_large_folders",
+    summary: "List the largest scanned folders under the configured storage roots.",
+    options: ["root", "limit"],
+    example: "list_large_folders root=notes"
+  }
+];
+
+const BACKUP_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "get_backup_status",
+    summary: "Summarize detected backup-related scheduled tasks and whether they look healthy, stale, or failing.",
+    example: "get_backup_status"
+  },
+  {
+    name: "find_failed_backups",
+    summary: "List backup-related scheduled tasks with stale runs, warnings, disabled state, or failures.",
+    options: ["limit"],
+    example: "find_failed_backups"
+  }
+];
+
+const NETWORK_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "check_endpoint_health",
+    summary: "Read the latest snapshot of configured endpoint checks, including local and public MCP and Plex probes.",
+    options: ["query", "unhealthyOnly", "limit"],
+    example: "check_endpoint_health unhealthyOnly=true"
+  },
+  {
+    name: "get_dns_summary",
+    summary: "Summarize Windows adapter DNS servers plus Tailscale MagicDNS status when available.",
+    example: "get_dns_summary"
+  },
+  {
+    name: "get_tailscale_status",
+    summary: "Summarize local Tailscale backend state, peers, Funnel, and Serve targets from the latest snapshot.",
+    example: "get_tailscale_status"
+  },
+  {
+    name: "get_public_exposure_summary",
+    summary: "Roll up Tailscale Funnel or Serve targets, public Docker bindings, and public endpoint probes into one view.",
+    example: "get_public_exposure_summary"
+  }
+];
+
 const FILE_COMMAND_CATALOG: CommandCatalogEntry[] = [
   {
     name: "search_files",
@@ -496,6 +569,27 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "list_plex_commands query=episode"
   },
   {
+    name: "list_storage_commands",
+    group: "storage",
+    summary: "List storage-focused commands for disks, low-space detection, and large folder summaries.",
+    options: ["query"],
+    example: "list_storage_commands query=space"
+  },
+  {
+    name: "list_backup_commands",
+    group: "backup",
+    summary: "List backup-focused commands for backup task health and failure review.",
+    options: ["query"],
+    example: "list_backup_commands query=failed"
+  },
+  {
+    name: "list_network_commands",
+    group: "network",
+    summary: "List network-focused commands for endpoint checks, DNS, Tailscale, and public exposure.",
+    options: ["query"],
+    example: "list_network_commands query=tailscale"
+  },
+  {
     name: "get_snapshot_status",
     group: "snapshot",
     summary: "Show snapshot freshness, scheduler status, and whether the host refresh data is current or stale.",
@@ -527,6 +621,18 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_attention_report"
   },
   {
+    name: "get_daily_digest",
+    group: "snapshot",
+    summary: "Summarize the current operational state and recommend the most relevant next checks.",
+    example: "get_daily_digest"
+  },
+  {
+    name: "summarize_system_state",
+    group: "snapshot",
+    summary: "Natural alias for a broad operational system-state summary across the current tool profile.",
+    example: "summarize_system_state"
+  },
+  {
     name: "find_home",
     group: "discovery",
     summary: "Natural cross-domain finder that searches Plex, Docker, host, notes, and homelab data from a single query.",
@@ -553,6 +659,64 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     summary: "Natural note finder that surfaces exact slug or title matches plus content previews.",
     options: ["query", "limit"],
     example: "find_notes query=homelab"
+  },
+  {
+    name: "get_storage_health",
+    group: "storage",
+    summary: "Summarize disk free space plus the largest scanned folders in the latest storage snapshot.",
+    example: "get_storage_health"
+  },
+  {
+    name: "find_low_space_locations",
+    group: "storage",
+    summary: "List disks below the free-space threshold and the biggest scanned folders on those drives.",
+    options: ["thresholdPercent", "limit"],
+    example: "find_low_space_locations thresholdPercent=15"
+  },
+  {
+    name: "list_large_folders",
+    group: "storage",
+    summary: "List the largest scanned folders under the configured storage roots.",
+    options: ["root", "limit"],
+    example: "list_large_folders root=notes"
+  },
+  {
+    name: "get_backup_status",
+    group: "backup",
+    summary: "Summarize detected backup-related scheduled tasks and whether they look healthy, stale, or failing.",
+    example: "get_backup_status"
+  },
+  {
+    name: "find_failed_backups",
+    group: "backup",
+    summary: "List backup-related scheduled tasks with stale runs, warnings, disabled state, or failures.",
+    options: ["limit"],
+    example: "find_failed_backups"
+  },
+  {
+    name: "check_endpoint_health",
+    group: "network",
+    summary: "Read the latest snapshot of configured endpoint checks and their reachability results.",
+    options: ["query", "unhealthyOnly", "limit"],
+    example: "check_endpoint_health unhealthyOnly=true"
+  },
+  {
+    name: "get_dns_summary",
+    group: "network",
+    summary: "Summarize DNS servers from the latest Windows adapter snapshot and Tailscale MagicDNS when present.",
+    example: "get_dns_summary"
+  },
+  {
+    name: "get_tailscale_status",
+    group: "network",
+    summary: "Summarize local Tailscale backend state, peers, Funnel, and Serve targets.",
+    example: "get_tailscale_status"
+  },
+  {
+    name: "get_public_exposure_summary",
+    group: "network",
+    summary: "Roll up public exposure from Tailscale, Docker published ports, and endpoint checks.",
+    example: "get_public_exposure_summary"
   },
   {
     name: "get_host_status",
@@ -582,6 +746,9 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_host_network_summary query=ethernet"
   },
   ...withGroup(WINDOWS_COMMAND_CATALOG, "windows"),
+  ...withGroup(STORAGE_COMMAND_CATALOG, "storage"),
+  ...withGroup(BACKUP_COMMAND_CATALOG, "backup"),
+  ...withGroup(NETWORK_COMMAND_CATALOG, "network"),
   ...withGroup(FILE_COMMAND_CATALOG, "files"),
   ...withGroup(REPO_COMMAND_CATALOG, "repos"),
   {
@@ -716,6 +883,9 @@ export function createServer(options?: { profile?: ToolProfile }) {
   const visibleDockerCatalog = DOCKER_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visiblePlexCatalog = PLEX_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visibleWindowsCatalog = WINDOWS_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleStorageCatalog = STORAGE_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleBackupCatalog = BACKUP_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleNetworkCatalog = NETWORK_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visibleFileCatalog = FILE_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visibleRepoCatalog = REPO_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
 
@@ -741,7 +911,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
     "Use this to list the major MCP commands exposed by this server, with optional area and keyword filters.",
     {
       area: z
-        .enum(["all", "discovery", "snapshot", "host", "windows", "files", "repos", "docker", "plex", "notes"])
+        .enum(["all", "discovery", "snapshot", "host", "windows", "storage", "backup", "network", "files", "repos", "docker", "plex", "notes"])
         .optional()
         .describe("Optional command group filter"),
       query: z
@@ -808,6 +978,60 @@ export function createServer(options?: { profile?: ToolProfile }) {
           {
             type: "text",
             text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Windows", visibleWindowsCatalog, query)].join("\n")
+          }
+        ]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_storage_commands",
+    "Use this to list storage-focused MCP commands for disk pressure and large-folder review.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example disk, folder, or space")
+    },
+    async ({ query }) => {
+      return withAudit("list_storage_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Storage", visibleStorageCatalog, query)].join("\n")
+          }
+        ]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_backup_commands",
+    "Use this to list backup-focused MCP commands exposed by this server.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example backup, stale, or failed")
+    },
+    async ({ query }) => {
+      return withAudit("list_backup_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Backups", visibleBackupCatalog, query)].join("\n")
+          }
+        ]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_network_commands",
+    "Use this to list network-focused MCP commands for endpoint checks, DNS, Tailscale, and public exposure.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example endpoint, dns, tailscale, or exposure")
+    },
+    async ({ query }) => {
+      return withAudit("list_network_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Network", visibleNetworkCatalog, query)].join("\n")
           }
         ]
       }));
@@ -945,7 +1169,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
 
   server.tool(
     "get_attention_report",
-    "Use this to highlight stale snapshots, Docker problems, stopped automatic services, failed tasks, and dirty repos.",
+    "Use this to highlight stale snapshots, Docker problems, stopped automatic services, failed tasks, low-space disks, backup issues, unhealthy endpoints, and dirty repos.",
     {},
     async () => {
       return withAudit("get_attention_report", undefined, async () => {
@@ -966,12 +1190,57 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "get_daily_digest",
+    "Use this to summarize the current operational state and recommend the most relevant next checks.",
+    {},
+    async () => {
+      return withAudit("get_daily_digest", undefined, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatDailyDigest(profile) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_daily_digest returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to build the daily digest: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "summarize_system_state",
+    "Use this as a natural alias for a broad operational system-state summary across the current tool profile.",
+    {},
+    async () => {
+      return withAudit("summarize_system_state", undefined, async () => {
+        try {
+          const dashboard = await formatOperationsDashboardForProfile(notesDir, profile);
+          return {
+            content: [{ type: "text", text: `System state summary\n\n${dashboard}` }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool summarize_system_state returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to summarize the system state: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "find_home",
-    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, files, repos, notes, or homelab data.",
+    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, storage, backups, network, files, repos, notes, or homelab data.",
     {
       query: z.string().min(1).describe("Natural search phrase, for example Sopranos, backups, or mcp-home"),
       area: z
-        .enum(["auto", "docker", "plex", "notes", "homelab", "host", "files", "repos"])
+        .enum(["auto", "docker", "plex", "notes", "homelab", "host", "storage", "backup", "network", "files", "repos"])
         .optional()
         .describe("Optional scope if you already know the area to search"),
       limit: z.number().int().min(1).max(10).optional().describe("Maximum number of top matches to include, from 1 to 10")
@@ -1031,11 +1300,11 @@ export function createServer(options?: { profile?: ToolProfile }) {
 
   server.tool(
     "find_host",
-    "Use this as the natural Windows host entrypoint for components, resources, disks, network adapters, services, tasks, and ports.",
+    "Use this as the natural Windows host entrypoint for components, resources, disks, storage folders, backups, endpoint checks, Tailscale, services, tasks, and ports.",
     {
       query: z.string().min(1).describe("Natural host query, for example memory, C:, ethernet, or corsair"),
       domain: z
-        .enum(["auto", "component", "resource", "disk", "network", "service", "task", "port"])
+        .enum(["auto", "component", "resource", "disk", "storage", "network", "backup", "endpoint", "tailscale", "service", "task", "port"])
         .optional()
         .describe("Optional host scope"),
       limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matches to return, from 1 to 25")
@@ -1044,6 +1313,57 @@ export function createServer(options?: { profile?: ToolProfile }) {
       return withAudit("find_host", { query, domain, limit }, async () => {
         try {
           const status = await readWindowsHostStatus();
+          if (domain === "storage") {
+            return {
+              content: [{ type: "text", text: formatStorageFind(status, { query, limit }) }]
+            };
+          }
+          if (domain === "backup") {
+            return {
+              content: [{ type: "text", text: formatBackupFind(status, { query, limit }) }]
+            };
+          }
+          if (domain === "network" || domain === "endpoint" || domain === "tailscale") {
+            return {
+              content: [{ type: "text", text: formatNetworkFind(status, { query, limit }) }]
+            };
+          }
+
+          if (!domain || domain === "auto") {
+            const sections: string[] = [];
+            const hostText = formatHostFind(status, { query, limit });
+            if (!hostText.includes("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.")) {
+              sections.push(hostText);
+            }
+
+            const storageText = formatStorageFind(status, { query, limit });
+            if (!storageText.includes("- No disks or scanned folders matched that query.")) {
+              sections.push(storageText);
+            }
+
+            const backupText = formatBackupFind(status, { query, limit });
+            if (!backupText.includes("- No backup tasks matched that query.")) {
+              sections.push(backupText);
+            }
+
+            const networkText = formatNetworkFind(status, { query, limit });
+            if (!networkText.includes("- No endpoint checks, Tailscale peers, or exposure items matched that query.")) {
+              sections.push(networkText);
+            }
+
+            return {
+              content: [
+                {
+                  type: "text",
+                  text:
+                    sections.length > 0
+                      ? sections.join("\n\n")
+                      : `Generated: ${status.generatedAt}\nHost finder for "${query}":\n\n- No host, storage, backup, or network matches were found.`
+                }
+              ]
+            };
+          }
+
           return {
             content: [{ type: "text", text: formatHostFind(status, { query, domain, limit }) }]
           };
@@ -1272,6 +1592,270 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to read host network summary: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_storage_health",
+    "Use this to summarize disk free space plus the largest scanned folders from the latest storage snapshot.",
+    {},
+    async () => {
+      return withAudit("get_storage_health", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatStorageHealth(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_storage_health returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read storage health: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_low_space_locations",
+    "Use this to list disks below the free-space threshold and the biggest scanned folders on those drives.",
+    {
+      thresholdPercent: z.number().min(1).max(75).optional().describe("Optional free-space threshold percent from 1 to 75"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of disks to return, from 1 to 50")
+    },
+    async ({ thresholdPercent, limit }) => {
+      return withAudit("find_low_space_locations", { thresholdPercent, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatLowSpaceLocations(status, { thresholdPercent, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_low_space_locations returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect low-space disks: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_large_folders",
+    "Use this to list the largest scanned folders under the configured storage roots.",
+    {
+      root: z.string().min(1).optional().describe("Optional scan root, path fragment, or folder-name filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of folders to return, from 1 to 100")
+    },
+    async ({ root, limit }) => {
+      return withAudit("list_large_folders", { root, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatLargeFolders(status, { root, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_large_folders returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list large folders: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_backup_status",
+    "Use this to summarize detected backup-related scheduled tasks and whether they look healthy, stale, or failing.",
+    {},
+    async () => {
+      return withAudit("get_backup_status", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatBackupStatus(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_backup_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read backup status: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_failed_backups",
+    "Use this to list backup-related scheduled tasks with stale runs, warnings, disabled state, or failures.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of backup tasks to return, from 1 to 100")
+    },
+    async ({ limit }) => {
+      return withAudit("find_failed_backups", { limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatFailedBackups(status, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_failed_backups returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect backup failures: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "check_endpoint_health",
+    "Use this to read the latest snapshot of configured endpoint checks and their reachability results.",
+    {
+      query: z.string().min(1).optional().describe("Optional endpoint name or URL filter"),
+      unhealthyOnly: z.boolean().optional().describe("Optional filter to show only unhealthy endpoints"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of endpoint checks to return, from 1 to 100")
+    },
+    async ({ query, unhealthyOnly, limit }) => {
+      return withAudit("check_endpoint_health", { query, unhealthyOnly, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatEndpointHealth(status, { query, unhealthyOnly, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool check_endpoint_health returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect endpoint health: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_dns_summary",
+    "Use this to summarize DNS servers from the latest Windows adapter snapshot and Tailscale MagicDNS when present.",
+    {},
+    async () => {
+      return withAudit("get_dns_summary", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatDnsSummary(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_dns_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read the DNS summary: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_tailscale_status",
+    "Use this to summarize local Tailscale backend state, peers, Funnel, and Serve targets from the latest snapshot.",
+    {},
+    async () => {
+      return withAudit("get_tailscale_status", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatTailscaleStatus(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_tailscale_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read the Tailscale status snapshot: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_public_exposure_summary",
+    "Use this to roll up Tailscale Funnel or Serve targets, public Docker bindings, and public endpoint probes into one view.",
+    {},
+    async () => {
+      return withAudit("get_public_exposure_summary", undefined, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatPublicExposureSummary(status) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_public_exposure_summary returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read the public exposure summary: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

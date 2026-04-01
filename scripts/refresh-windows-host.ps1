@@ -1,6 +1,48 @@
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
+
+function Import-DotEnvFile {
+  param([string]$Path)
+
+  if (-not (Test-Path $Path)) {
+    return
+  }
+
+  foreach ($line in Get-Content -Path $Path -ErrorAction SilentlyContinue) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+
+    $trimmed = $line.Trim()
+    if ($trimmed.StartsWith("#") -or -not $trimmed.Contains("=")) {
+      continue
+    }
+
+    $parts = $trimmed.Split("=", 2)
+    if ($parts.Count -ne 2) {
+      continue
+    }
+
+    $name = $parts[0].Trim()
+    if ([string]::IsNullOrWhiteSpace($name)) {
+      continue
+    }
+
+    $value = $parts[1].Trim()
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+      $value = $value.Substring(1, $value.Length - 2)
+    }
+
+    $currentValue = [Environment]::GetEnvironmentVariable($name, "Process")
+    if ([string]::IsNullOrWhiteSpace($currentValue)) {
+      Set-Item -Path ("Env:" + $name) -Value $value
+    }
+  }
+}
+
+Import-DotEnvFile -Path (Join-Path $repoRoot ".env")
+
 $dataDir = Join-Path $repoRoot "data\local"
 $hostStatusPath = Join-Path $dataDir "windows-host-status.json"
 $plexIndexPath = Join-Path $dataDir "plex-library-index.json"
@@ -584,6 +626,619 @@ function Get-ListeningPortsSnapshot {
         }
       }
   )
+}
+
+function Get-IntegerEnvValue {
+  param(
+    [string]$Name,
+    [int]$Default,
+    [int]$Min = 1,
+    [int]$Max = 2147483647
+  )
+
+  $raw = [Environment]::GetEnvironmentVariable($Name, "Process")
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    return $Default
+  }
+
+  $parsed = 0
+  if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge $Min -and $parsed -le $Max) {
+    return $parsed
+  }
+
+  return $Default
+}
+
+function Get-DirectoryUsage {
+  param(
+    [string]$Path,
+    [string]$Root,
+    [int]$Depth
+  )
+
+  $files = @()
+  $directories = @()
+  $errorText = $null
+
+  try {
+    $files = @(
+      Get-ChildItem -LiteralPath $Path -File -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-ExcludedScanPath -Path $_.FullName) }
+    )
+  } catch {
+    $errorText = $_.Exception.Message
+  }
+
+  try {
+    $directories = @(
+      Get-ChildItem -LiteralPath $Path -Directory -Recurse -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-ExcludedScanPath -Path $_.FullName) }
+    )
+  } catch {
+    if (-not $errorText) {
+      $errorText = $_.Exception.Message
+    }
+  }
+
+  $totalBytes = [int64]0
+  $latestModified = $null
+  foreach ($file in $files) {
+    $totalBytes += [int64]$file.Length
+    if (-not $latestModified -or $file.LastWriteTimeUtc -gt $latestModified) {
+      $latestModified = $file.LastWriteTimeUtc
+    }
+  }
+
+  foreach ($directory in $directories) {
+    if (-not $latestModified -or $directory.LastWriteTimeUtc -gt $latestModified) {
+      $latestModified = $directory.LastWriteTimeUtc
+    }
+  }
+
+  $directoryInfo = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+  if ($directoryInfo -and (-not $latestModified -or $directoryInfo.LastWriteTimeUtc -gt $latestModified)) {
+    $latestModified = $directoryInfo.LastWriteTimeUtc
+  }
+
+  return [ordered]@{
+    root = $Root
+    path = $Path
+    name = Split-Path -Path $Path -Leaf
+    depth = $Depth
+    totalBytes = [int64]$totalBytes
+    fileCount = @($files).Count
+    directoryCount = @($directories).Count
+    lastModified = if ($latestModified) { $latestModified.ToString("o") } else { $null }
+    drive = if ($Path -match "^[A-Za-z]:") { $Path.Substring(0, 2).ToUpperInvariant() } else { $null }
+    error = $errorText
+  }
+}
+
+function Get-StorageFolderSnapshot {
+  param(
+    [string[]]$Roots,
+    [int]$ChildLimit = 15,
+    [int]$LowSpaceThresholdPercent = 15
+  )
+
+  $summaries = New-Object System.Collections.Generic.List[object]
+  foreach ($root in $Roots) {
+    if (-not (Test-Path $root)) {
+      continue
+    }
+
+    $childDirectories = @(
+      Get-ChildItem -LiteralPath $root -Directory -Force -ErrorAction SilentlyContinue |
+        Where-Object { -not (Test-ExcludedScanPath -Path $_.FullName) } |
+        Sort-Object Name |
+        Select-Object -First $ChildLimit
+    )
+
+    if ($childDirectories.Count -eq 0) {
+      $summaries.Add((Get-DirectoryUsage -Path $root -Root $root -Depth 0)) | Out-Null
+      continue
+    }
+
+    foreach ($directory in $childDirectories) {
+      $summaries.Add((Get-DirectoryUsage -Path $directory.FullName -Root $root -Depth 1)) | Out-Null
+    }
+  }
+
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    scanRoots = @($Roots)
+    childLimit = $ChildLimit
+    lowSpaceThresholdPercent = $LowSpaceThresholdPercent
+    scannedFolders = @($summaries | Sort-Object totalBytes -Descending)
+  }
+}
+
+function Get-ConfiguredBackupKeywords {
+  $raw = [Environment]::GetEnvironmentVariable("BACKUP_TASK_KEYWORDS", "Process")
+  if ([string]::IsNullOrWhiteSpace($raw)) {
+    return @("backup", "file history", "filehistory", "regidlebackup", "veeam", "archive", "robocopy", "clone")
+  }
+
+  return @(
+    $raw -split "[;\r\n,]+" |
+      ForEach-Object { $_.Trim().ToLowerInvariant() } |
+      Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+      Select-Object -Unique
+  )
+}
+
+function Test-BackupTaskMatch {
+  param(
+    [object]$Task,
+    [string[]]$Keywords
+  )
+
+  $haystack = @(
+    [string]$Task.name
+    [string]$Task.path
+    @($Task.actions)
+  ) -join " "
+
+  $normalized = $haystack.ToLowerInvariant()
+  foreach ($keyword in $Keywords) {
+    if ($normalized.Contains($keyword)) {
+      return $true
+    }
+  }
+
+  return $false
+}
+
+function Get-BackupTaskSnapshot {
+  param(
+    [object[]]$Tasks,
+    [string[]]$Keywords,
+    [int]$StaleAfterHours = 48
+  )
+
+  $cutoff = (Get-Date).ToUniversalTime().AddHours(-1 * $StaleAfterHours)
+  $backupTasks = New-Object System.Collections.Generic.List[object]
+
+  foreach ($task in $Tasks) {
+    if (-not (Test-BackupTaskMatch -Task $task -Keywords $Keywords)) {
+      continue
+    }
+
+    $reasons = New-Object System.Collections.Generic.List[string]
+    $issue = "none"
+    $lastRunUtc = $null
+    if ($task.lastRunTime) {
+      try {
+        $lastRunUtc = [DateTimeOffset]::Parse([string]$task.lastRunTime).UtcDateTime
+      } catch {
+        $lastRunUtc = $null
+      }
+    }
+
+    if (-not $task.enabled) {
+      $issue = "warning"
+      $reasons.Add("task disabled") | Out-Null
+    }
+
+    if ($null -ne $task.lastTaskResult -and [int64]$task.lastTaskResult -ne 0) {
+      $issue = "failure"
+      $reasons.Add("non-zero last task result") | Out-Null
+    }
+
+    if (-not $lastRunUtc -and $task.enabled) {
+      if ($issue -eq "none") {
+        $issue = "warning"
+      }
+      $reasons.Add("never ran") | Out-Null
+    } elseif ($lastRunUtc -and $lastRunUtc -lt $cutoff -and $task.enabled) {
+      if ($issue -eq "none") {
+        $issue = "warning"
+      }
+      $reasons.Add("last run is stale") | Out-Null
+    }
+
+    $shouldFlagMissingNextRun = (
+      -not $task.nextRunTime -and
+      $task.enabled -and
+      $task.state -ne "Running" -and
+      (
+        -not $lastRunUtc -or
+        ($lastRunUtc -and $lastRunUtc -lt $cutoff) -or
+        ($null -ne $task.lastTaskResult -and [int64]$task.lastTaskResult -ne 0)
+      )
+    )
+
+    if ($shouldFlagMissingNextRun) {
+      if ($issue -eq "none") {
+        $issue = "warning"
+      }
+      $reasons.Add("no next run scheduled") | Out-Null
+    }
+
+    $backupTasks.Add([ordered]@{
+        name = [string]$task.name
+        path = [string]$task.path
+        displayPath = ([string]$task.path + [string]$task.name)
+        state = [string]$task.state
+        enabled = [bool]$task.enabled
+        lastRunTime = if ($task.lastRunTime) { [string]$task.lastRunTime } else { $null }
+        nextRunTime = if ($task.nextRunTime) { [string]$task.nextRunTime } else { $null }
+        lastTaskResult = if ($null -ne $task.lastTaskResult) { [int64]$task.lastTaskResult } else { $null }
+        stale = [bool]($lastRunUtc -and $lastRunUtc -lt $cutoff)
+        issue = $issue
+        reasons = $reasons.ToArray()
+        actions = @($task.actions)
+      }) | Out-Null
+  }
+
+  $taskArray = @($backupTasks | Sort-Object displayPath)
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    staleAfterHours = $StaleAfterHours
+    taskKeywords = @($Keywords)
+    taskCount = $taskArray.Count
+    healthyCount = @($taskArray | Where-Object { $_.issue -eq "none" }).Count
+    warningCount = @($taskArray | Where-Object { $_.issue -eq "warning" }).Count
+    failureCount = @($taskArray | Where-Object { $_.issue -eq "failure" }).Count
+    tasks = $taskArray
+  }
+}
+
+function Resolve-EndpointCheckDefinitions {
+  param(
+    [string]$PlexLocalUrl
+  )
+
+  $definitions = New-Object System.Collections.Generic.List[object]
+  $seen = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+
+  $raw = [Environment]::GetEnvironmentVariable("NETWORK_ENDPOINT_CHECKS", "Process")
+  $items = @()
+  if (-not [string]::IsNullOrWhiteSpace($raw)) {
+    $items = @(
+      $raw -split "[;\r\n]+" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+  } else {
+    $items = @("mcp-local=http://127.0.0.1:8788/health", "plex-local=${PlexLocalUrl}/identity")
+    $serverUrl = [Environment]::GetEnvironmentVariable("MCP_SERVER_URL", "Process")
+    if (-not [string]::IsNullOrWhiteSpace($serverUrl)) {
+      try {
+        $serverUri = [System.Uri]::new($serverUrl)
+        $publicHealth = [System.Uri]::new($serverUri, "/health").AbsoluteUri
+        $items += "mcp-public=${publicHealth}"
+      } catch {
+      }
+    }
+  }
+
+  foreach ($item in $items) {
+    $name = $null
+    $url = $null
+    if ($item.Contains("=")) {
+      $parts = $item.Split("=", 2)
+      $name = $parts[0].Trim()
+      $url = $parts[1].Trim()
+    } else {
+      $url = $item.Trim()
+      $name = "endpoint-" + ($definitions.Count + 1)
+    }
+
+    if ([string]::IsNullOrWhiteSpace($url) -or $seen.Contains($url)) {
+      continue
+    }
+
+    try {
+      $uri = [System.Uri]::new($url)
+      if ($uri.Scheme -notin @("http", "https")) {
+        continue
+      }
+
+      $seen.Add($url) | Out-Null
+      $definitions.Add([ordered]@{
+          name = if ([string]::IsNullOrWhiteSpace($name)) { $uri.Host } else { $name }
+          url = $uri.AbsoluteUri
+        }) | Out-Null
+    } catch {
+    }
+  }
+
+  return $definitions.ToArray()
+}
+
+function Invoke-EndpointHealthCheck {
+  param(
+    [string]$Name,
+    [string]$Url,
+    [int]$TimeoutSeconds = 5
+  )
+
+  $started = Get-Date
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -Method Get -TimeoutSec $TimeoutSeconds -ErrorAction Stop
+    $latency = [int][Math]::Round(((Get-Date) - $started).TotalMilliseconds)
+    return [ordered]@{
+      name = $Name
+      url = $Url
+      healthy = $true
+      statusCode = [int]$response.StatusCode
+      statusText = if ($response.StatusDescription) { [string]$response.StatusDescription } else { "OK" }
+      latencyMs = $latency
+      checkedAt = Get-IsoNow
+      error = $null
+    }
+  } catch {
+    $statusCode = $null
+    try {
+      if ($_.Exception.Response -and $_.Exception.Response.StatusCode) {
+        $statusCode = [int]$_.Exception.Response.StatusCode.value__
+      }
+    } catch {
+      $statusCode = $null
+    }
+
+    $latency = [int][Math]::Round(((Get-Date) - $started).TotalMilliseconds)
+    return [ordered]@{
+      name = $Name
+      url = $Url
+      healthy = $false
+      statusCode = $statusCode
+      statusText = $null
+      latencyMs = $latency
+      checkedAt = Get-IsoNow
+      error = $_.Exception.Message
+    }
+  }
+}
+
+function Get-EndpointHealthSnapshot {
+  param(
+    [string]$PlexLocalUrl,
+    [int]$TimeoutSeconds = 5
+  )
+
+  $definitions = Resolve-EndpointCheckDefinitions -PlexLocalUrl $PlexLocalUrl
+  return @(
+    $definitions |
+      ForEach-Object { Invoke-EndpointHealthCheck -Name $_.name -Url $_.url -TimeoutSeconds $TimeoutSeconds }
+  )
+}
+
+function Get-TailscaleCommand {
+  $configured = [Environment]::GetEnvironmentVariable("TAILSCALE_EXE", "Process")
+  if (-not [string]::IsNullOrWhiteSpace($configured) -and (Test-Path $configured)) {
+    return [ordered]@{
+      Source = $configured
+    }
+  }
+
+  $defaultPath = "C:\Program Files\Tailscale\tailscale.exe"
+  if (Test-Path $defaultPath) {
+    return [ordered]@{
+      Source = $defaultPath
+    }
+  }
+
+  return Get-Command tailscale -ErrorAction SilentlyContinue
+}
+
+function Parse-TailscaleProxyTargets {
+  param([string]$Output)
+
+  if ([string]::IsNullOrWhiteSpace($Output)) {
+    return @()
+  }
+
+  $targets = New-Object System.Collections.Generic.List[string]
+  $currentUrl = $null
+  foreach ($line in ($Output -split "\r?\n")) {
+    $trimmed = $line.Trim()
+    if ([string]::IsNullOrWhiteSpace($trimmed) -or $trimmed.StartsWith("#")) {
+      continue
+    }
+
+    if ($trimmed -match "^(https?://\S+)") {
+      $currentUrl = $matches[1]
+      if (-not $targets.Contains($currentUrl)) {
+        $targets.Add($currentUrl) | Out-Null
+      }
+      continue
+    }
+
+    if ($trimmed -match "^\|--\s+(.*)$" -and $currentUrl) {
+      $mapped = "${currentUrl} -> $($matches[1].Trim())"
+      if ($targets.Contains($currentUrl)) {
+        $targets.Remove($currentUrl) | Out-Null
+      }
+      if (-not $targets.Contains($mapped)) {
+        $targets.Add($mapped) | Out-Null
+      }
+      $currentUrl = $null
+    }
+  }
+
+  return $targets.ToArray()
+}
+
+function Get-TailscaleStatusSnapshot {
+  $command = Get-TailscaleCommand
+  if (-not $command) {
+    return [ordered]@{
+      installed = $false
+      checkedAt = Get-IsoNow
+      funnelEnabled = $false
+      serveEnabled = $false
+      funnelTargets = @()
+      serveTargets = @()
+      peers = @()
+    }
+  }
+
+  $versionOutput = & $command.Source version 2>$null
+  $version = if ($LASTEXITCODE -eq 0 -and $versionOutput) { ([string]($versionOutput | Select-Object -First 1)).Trim() } else { $null }
+
+  $statusJson = $null
+  $statusOutput = & $command.Source status --json 2>$null
+  if ($LASTEXITCODE -eq 0 -and $statusOutput) {
+    try {
+      $statusJson = $statusOutput | ConvertFrom-Json
+    } catch {
+      $statusJson = $null
+    }
+  }
+
+  $funnelRaw = & $command.Source funnel status 2>$null
+  $funnelTargets = if ($LASTEXITCODE -eq 0) { Parse-TailscaleProxyTargets -Output ($funnelRaw -join "`n") } else { @() }
+  $serveRaw = & $command.Source serve status 2>$null
+  $serveTargets = if ($LASTEXITCODE -eq 0) { Parse-TailscaleProxyTargets -Output ($serveRaw -join "`n") } else { @() }
+
+  $peerEntries = New-Object System.Collections.Generic.List[object]
+  if ($statusJson -and $statusJson.Peer) {
+    foreach ($property in $statusJson.Peer.PSObject.Properties) {
+      $peer = $property.Value
+      $peerEntries.Add([ordered]@{
+          name = if ($peer.HostName) { [string]$peer.HostName } elseif ($peer.DNSName) { [string]$peer.DNSName } else { [string]$property.Name }
+          dnsName = if ($peer.DNSName) { ([string]$peer.DNSName).TrimEnd(".") } else { $null }
+          os = if ($peer.OS) { [string]$peer.OS } else { $null }
+          online = if ($null -ne $peer.Online) { [bool]$peer.Online } else { $null }
+          active = if ($null -ne $peer.Active) { [bool]$peer.Active } else { $null }
+          tailnetIps = @($peer.TailscaleIPs)
+        }) | Out-Null
+    }
+  }
+
+  $self = if ($statusJson) { $statusJson.Self } else { $null }
+  return [ordered]@{
+    installed = $true
+    checkedAt = Get-IsoNow
+    version = $version
+    backendState = if ($statusJson) { [string]$statusJson.BackendState } else { $null }
+    tailnetName = if ($statusJson -and $statusJson.CurrentTailnet) { [string]$statusJson.CurrentTailnet.Name } else { $null }
+    magicDnsEnabled = if ($statusJson -and $statusJson.CurrentTailnet -and $null -ne $statusJson.CurrentTailnet.MagicDNSEnabled) { [bool]$statusJson.CurrentTailnet.MagicDNSEnabled } else { $null }
+    magicDnsSuffix = if ($statusJson -and $statusJson.CurrentTailnet) { [string]$statusJson.CurrentTailnet.MagicDNSSuffix } else { $null }
+    selfHostName = if ($self -and $self.HostName) { [string]$self.HostName } else { $null }
+    selfDnsName = if ($self -and $self.DNSName) { ([string]$self.DNSName).TrimEnd(".") } else { $null }
+    selfOnline = if ($self -and $null -ne $self.Online) { [bool]$self.Online } else { $null }
+    tailscaleIps = if ($statusJson) { @($statusJson.TailscaleIPs) } else { @() }
+    peerCount = $peerEntries.Count
+    onlinePeerCount = @($peerEntries.ToArray() | Where-Object { $_.online -eq $true }).Count
+    activePeerCount = @($peerEntries.ToArray() | Where-Object { $_.active -eq $true }).Count
+    funnelEnabled = $funnelTargets.Count -gt 0
+    serveEnabled = $serveTargets.Count -gt 0
+    funnelTargets = @($funnelTargets)
+    serveTargets = @($serveTargets)
+    peers = @($peerEntries.ToArray() | Sort-Object name)
+  }
+}
+
+function Get-DockerExposureKind {
+  param([string]$Ports)
+
+  if ([string]::IsNullOrWhiteSpace($Ports)) {
+    return "internal"
+  }
+
+  if ($Ports -match "0\.0\.0\.0:|\[::\]:|:::") {
+    return "public"
+  }
+
+  if ($Ports -match "127\.0\.0\.1:|localhost:|\[::1\]:") {
+    return "local-only"
+  }
+
+  if ($Ports.Contains("->")) {
+    return "host-ip"
+  }
+
+  return "internal"
+}
+
+function Test-PublicEndpointUrl {
+  param([string]$Url)
+
+  try {
+    $uri = [System.Uri]::new($Url)
+    return $uri.Host -notin @("localhost", "127.0.0.1", "::1")
+  } catch {
+    return $false
+  }
+}
+
+function Get-PublicExposureSnapshot {
+  param(
+    [object]$TailscaleSnapshot,
+    [object[]]$EndpointChecks,
+    [object[]]$DockerContainers
+  )
+
+  $items = New-Object System.Collections.Generic.List[object]
+  $funnelTargets = @()
+  $serveTargets = @()
+  $funnelEnabled = $false
+  $serveEnabled = $false
+
+  if ($TailscaleSnapshot) {
+    if ($TailscaleSnapshot -is [System.Collections.IDictionary]) {
+      $funnelTargets = @($TailscaleSnapshot["funnelTargets"])
+      $serveTargets = @($TailscaleSnapshot["serveTargets"])
+      $funnelEnabled = [bool]$TailscaleSnapshot["funnelEnabled"]
+      $serveEnabled = [bool]$TailscaleSnapshot["serveEnabled"]
+    } else {
+      $funnelTargets = @($TailscaleSnapshot.funnelTargets)
+      $serveTargets = @($TailscaleSnapshot.serveTargets)
+      $funnelEnabled = [bool]$TailscaleSnapshot.funnelEnabled
+      $serveEnabled = [bool]$TailscaleSnapshot.serveEnabled
+    }
+  }
+
+  foreach ($funnelTarget in $funnelTargets) {
+    $items.Add([ordered]@{
+        kind = "funnel"
+        label = "Tailscale Funnel"
+        target = [string]$funnelTarget
+        details = "Public HTTPS exposure"
+      }) | Out-Null
+  }
+
+  foreach ($serveTarget in $serveTargets) {
+    $items.Add([ordered]@{
+        kind = "serve"
+        label = "Tailscale Serve"
+        target = [string]$serveTarget
+        details = "Tailnet or local proxy exposure"
+      }) | Out-Null
+  }
+
+  foreach ($container in $DockerContainers) {
+    $kind = Get-DockerExposureKind -Ports ([string]$container.ports)
+    if ($kind -eq "public" -or $kind -eq "host-ip") {
+      $items.Add([ordered]@{
+          kind = if ($kind -eq "public") { "docker-public" } else { "docker-host-ip" }
+          label = [string]$container.name
+          target = [string]$container.ports
+          details = if ($container.composeProject) { "compose " + [string]$container.composeProject } else { [string]$container.image }
+        }) | Out-Null
+    }
+  }
+
+  foreach ($endpoint in $EndpointChecks) {
+    if (Test-PublicEndpointUrl -Url ([string]$endpoint.url)) {
+      $items.Add([ordered]@{
+          kind = "endpoint"
+          label = [string]$endpoint.name
+          target = [string]$endpoint.url
+          details = if ($endpoint.healthy) { "healthy" } else { "unhealthy" }
+        }) | Out-Null
+    }
+  }
+
+  $result = @{}
+  $result["generatedAt"] = (Get-IsoNow)
+  $result["funnelEnabled"] = $funnelEnabled
+  $result["serveEnabled"] = $serveEnabled
+  $result["exposedItems"] = $items.ToArray()
+  return $result
 }
 
 function Get-TextFilePreview {
@@ -1545,6 +2200,9 @@ try {
   $services = @(Get-WindowsServiceSnapshot)
   $scheduledTasks = @(Get-ScheduledTaskSnapshot)
   $listeningPorts = @(Get-ListeningPortsSnapshot -Services $services)
+  $backupKeywords = Get-ConfiguredBackupKeywords
+  $backupStaleHours = Get-IntegerEnvValue -Name "BACKUP_STALE_HOURS" -Default 48 -Min 1 -Max (24 * 365)
+  $backupSnapshot = Get-BackupTaskSnapshot -Tasks $scheduledTasks -Keywords $backupKeywords -StaleAfterHours $backupStaleHours
 
   $fileIndexRoots = Resolve-ConfiguredPaths -RawValue $env:FILE_INDEX_ROOTS -DefaultRelativePaths @("notes")
   $rawFileExtensions = if (-not [string]::IsNullOrWhiteSpace($env:FILE_INDEX_TEXT_EXTENSIONS)) {
@@ -1572,6 +2230,14 @@ try {
     }
   }
   $fileCatalogSnapshot = Get-FileCatalogSnapshot -Roots $fileIndexRoots -TextExtensions $rawFileExtensions -MaxFiles $fileMaxFiles -PreviewChars $filePreviewChars
+  $storageScanRoots = if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable("STORAGE_SCAN_ROOTS", "Process"))) {
+    @($fileIndexRoots)
+  } else {
+    Resolve-ConfiguredPaths -RawValue $env:STORAGE_SCAN_ROOTS
+  }
+  $storageChildLimit = Get-IntegerEnvValue -Name "STORAGE_SCAN_CHILD_LIMIT" -Default 15 -Min 1 -Max 50
+  $storageLowSpacePercent = Get-IntegerEnvValue -Name "STORAGE_LOW_SPACE_PERCENT" -Default 15 -Min 1 -Max 75
+  $storageSnapshot = Get-StorageFolderSnapshot -Roots $storageScanRoots -ChildLimit $storageChildLimit -LowSpaceThresholdPercent $storageLowSpacePercent
 
   $repoScanRoots = Resolve-ConfiguredPaths -RawValue $env:REPO_SCAN_ROOTS -DefaultRelativePaths @(".")
   $repoScanMaxDepth = 4
@@ -1684,6 +2350,9 @@ try {
   $corsairComponent = New-Component -Name "corsair" -Status $corsairStatus -Details $corsairDetails
 
   $plexLocalUrl = if ($env:PLEX_LOCAL_URL) { $env:PLEX_LOCAL_URL } else { "http://127.0.0.1:32400" }
+  $endpointTimeoutSeconds = Get-IntegerEnvValue -Name "NETWORK_CHECK_TIMEOUT_SECONDS" -Default 5 -Min 1 -Max 30
+  $endpointChecks = @(Get-EndpointHealthSnapshot -PlexLocalUrl $plexLocalUrl -TimeoutSeconds $endpointTimeoutSeconds)
+  $tailscaleSnapshot = Get-TailscaleStatusSnapshot
   $plexDbPath = if ($env:PLEX_DB_PATH) {
     $env:PLEX_DB_PATH
   } else {
@@ -1768,6 +2437,7 @@ try {
   }
 
   $plexComponent = New-Component -Name "plex" -Status $plexStatus -Details (($plexDetailsParts -join ". ") + ".")
+  $publicExposureSnapshot = Get-PublicExposureSnapshot -TailscaleSnapshot $tailscaleSnapshot -EndpointChecks $endpointChecks -DockerContainers $dockerContainers
 
   $cpuLoadText = if ($null -ne $resources.cpu.loadPercent) { "$([Math]::Round([double]$resources.cpu.loadPercent, 1))%" } else { "unknown" }
   $memoryUsedText = "$([Math]::Round([double]$resources.memory.percentUsed, 1))%"
@@ -1782,7 +2452,10 @@ try {
 
   $healthyComponents = ($components | Where-Object { $_.status -eq "healthy" }).Count
   $degradedComponents = ($components | Where-Object { $_.status -eq "degraded" }).Count
-  $summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline."
+  $lowSpaceDiskCount = @($resources.disks | Where-Object { $null -ne $_.percentFree -and $_.percentFree -le $storageLowSpacePercent }).Count
+  $backupIssueCount = $backupSnapshot.warningCount + $backupSnapshot.failureCount
+  $unhealthyEndpointCount = @($endpointChecks | Where-Object { -not $_.healthy }).Count
+  $summary = "Windows host status refreshed: $healthyComponents healthy, $degradedComponents degraded, $($components.Count - $healthyComponents - $degradedComponents) offline. Storage low-space disks: $lowSpaceDiskCount. Backup issues: $backupIssueCount. Unhealthy endpoints: $unhealthyEndpointCount."
 
   $payload = [ordered]@{
     generatedAt = Get-IsoNow
@@ -1799,6 +2472,11 @@ try {
     services = $services
     scheduledTasks = $scheduledTasks
     listeningPorts = $listeningPorts
+    storage = $storageSnapshot
+    backups = $backupSnapshot
+    endpointChecks = $endpointChecks
+    tailscale = $tailscaleSnapshot
+    publicExposure = $publicExposureSnapshot
     docker = [ordered]@{
       available = ($null -ne $dockerCommand)
       cliVersion = $dockerCliVersion

@@ -1,10 +1,13 @@
+import { formatBackupFind } from "./backups.js";
 import { formatFileSearchResults, readFileCatalogSnapshot, searchFiles } from "./files.js";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import { formatDockerFind, formatHostFind, readWindowsHostStatus } from "./host.js";
+import { formatNetworkFind } from "./network.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
 import { formatLocalRepos, readRepoStatusSnapshot } from "./repos.js";
+import { formatStorageFind } from "./storage.js";
 import { formatSnapshotHeadline, readSnapshotOverview } from "./snapshots.js";
 import type { ToolProfile } from "./server-meta.js";
 
@@ -81,10 +84,25 @@ export async function formatAttentionReport(profile: ToolProfile) {
   });
   const failedTasks = (hostStatus.scheduledTasks ?? []).filter((task) => (task.lastTaskResult ?? 0) !== 0);
   const dockerProblems = hostStatus.docker?.problemCount ?? 0;
+  const lowSpaceDisks = profile === "full"
+    ? (hostStatus.resources?.disks ?? []).filter((disk) => (disk.percentFree ?? 100) <= (hostStatus.storage?.lowSpaceThresholdPercent ?? 15))
+    : [];
+  const backupIssues = profile === "full" ? (hostStatus.backups?.tasks ?? []).filter((task) => task.issue !== "none") : [];
+  const unhealthyEndpoints = profile === "full" ? (hostStatus.endpointChecks ?? []).filter((endpoint) => !endpoint.healthy) : [];
   const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty) : [];
   const lines = ["Attention report:", "", formatSnapshotHeadline(snapshotOverview), ""];
 
-  if (staleSnapshots.length === 0 && lateSnapshots.length === 0 && dockerProblems === 0 && serviceIssues.length === 0 && failedTasks.length === 0 && dirtyRepos.length === 0) {
+  if (
+    staleSnapshots.length === 0 &&
+    lateSnapshots.length === 0 &&
+    dockerProblems === 0 &&
+    serviceIssues.length === 0 &&
+    failedTasks.length === 0 &&
+    lowSpaceDisks.length === 0 &&
+    backupIssues.length === 0 &&
+    unhealthyEndpoints.length === 0 &&
+    dirtyRepos.length === 0
+  ) {
     lines.push("- No urgent attention items were found in the latest snapshots.");
     return lines.join("\n");
   }
@@ -125,6 +143,30 @@ export async function formatAttentionReport(profile: ToolProfile) {
     lines.push("");
   }
 
+  if (lowSpaceDisks.length > 0) {
+    lines.push(`Low-space disks: ${lowSpaceDisks.length}`);
+    for (const disk of lowSpaceDisks.slice(0, 10)) {
+      lines.push(`- ${disk.name}${disk.volumeName ? ` (${disk.volumeName})` : ""} | ${disk.percentFree?.toFixed(1) ?? "unknown"}% free`);
+    }
+    lines.push("");
+  }
+
+  if (backupIssues.length > 0) {
+    lines.push(`Backup issues: ${backupIssues.length}`);
+    for (const task of backupIssues.slice(0, 10)) {
+      lines.push(`- ${task.displayPath} | ${task.issue} | ${task.reasons.join("; ") || "issue detected"}`);
+    }
+    lines.push("");
+  }
+
+  if (unhealthyEndpoints.length > 0) {
+    lines.push(`Unhealthy endpoint checks: ${unhealthyEndpoints.length}`);
+    for (const endpoint of unhealthyEndpoints.slice(0, 10)) {
+      lines.push(`- ${endpoint.name} | ${endpoint.error || endpoint.statusCode || "unhealthy"}`);
+    }
+    lines.push("");
+  }
+
   if (dirtyRepos.length > 0) {
     lines.push(`Dirty repos: ${dirtyRepos.length}`);
     for (const repo of dirtyRepos.slice(0, 10)) {
@@ -142,6 +184,15 @@ export async function formatAttentionReport(profile: ToolProfile) {
   }
   if (failedTasks.length > 0) {
     lines.push("- Use find_failed_tasks or get_scheduled_task_details to inspect the task failures.");
+  }
+  if (lowSpaceDisks.length > 0) {
+    lines.push("- Use get_storage_health or find_low_space_locations to inspect disk pressure and large folders.");
+  }
+  if (backupIssues.length > 0) {
+    lines.push("- Use get_backup_status or find_failed_backups to inspect backup drift or failures.");
+  }
+  if (unhealthyEndpoints.length > 0) {
+    lines.push("- Use check_endpoint_health or get_public_exposure_summary to inspect network reachability.");
   }
   if (dirtyRepos.length > 0) {
     lines.push("- Use list_local_repos or get_repo_status to review repo changes.");
@@ -197,6 +248,28 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
     if (host.resources) {
       lines.push(
         `Host resources: CPU ${host.resources.cpu.loadPercent ?? "unknown"}% | RAM ${Math.round(host.resources.memory.percentUsed)}% used | ${host.resources.disks.length} disks | ${host.resources.network.adapterCount} adapters`
+      );
+    }
+    if (profile === "full" && host.storage) {
+      const lowSpaceDisks = (host.resources?.disks ?? []).filter(
+        (disk) => (disk.percentFree ?? 100) <= host.storage!.lowSpaceThresholdPercent
+      );
+      lines.push(
+        `Storage: ${host.storage.scannedFolders.length} scanned folders | ${lowSpaceDisks.length} low-space disks at or below ${host.storage.lowSpaceThresholdPercent}% free`
+      );
+    }
+    if (profile === "full" && host.backups) {
+      lines.push(
+        `Backups: ${host.backups.taskCount} tasks | ${host.backups.failureCount} failures | ${host.backups.warningCount} warnings`
+      );
+    }
+    if (profile === "full" && host.endpointChecks) {
+      const unhealthyEndpoints = host.endpointChecks.filter((endpoint) => !endpoint.healthy).length;
+      lines.push(`Endpoints: ${host.endpointChecks.length} checks | ${unhealthyEndpoints} unhealthy`);
+    }
+    if (profile === "full" && host.tailscale) {
+      lines.push(
+        `Tailscale: ${host.tailscale.backendState || "unknown"} | funnel ${host.tailscale.funnelEnabled ? "on" : "off"} | peers ${host.tailscale.peerCount ?? 0}`
       );
     }
     if (host.docker) {
@@ -264,6 +337,12 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   if (hostResult.status === "fulfilled" && (hostResult.value.docker?.problemCount ?? 0) > 0) {
     actions.push("Review Docker issues with get_docker_issues or get_docker_restart_report.");
   }
+  if (hostResult.status === "fulfilled" && ((hostResult.value.backups?.failureCount ?? 0) > 0 || (hostResult.value.backups?.warningCount ?? 0) > 0)) {
+    actions.push("Review backup drift with get_backup_status or find_failed_backups.");
+  }
+  if (hostResult.status === "fulfilled" && (hostResult.value.endpointChecks?.some((endpoint) => !endpoint.healthy) ?? false)) {
+    actions.push("Review network reachability with check_endpoint_health.");
+  }
   if (repoResult.status === "fulfilled" && repoResult.value.repos.some((repo) => repo.dirty)) {
     actions.push("Use list_local_repos or get_repo_status to review dirty repositories.");
   }
@@ -283,7 +362,7 @@ export async function formatHomeFind(
   notesDir: string,
   options: {
     query: string;
-    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host" | "files" | "repos";
+    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host" | "files" | "repos" | "storage" | "backup" | "network";
     limit?: number;
     profile?: ToolProfile;
   }
@@ -322,6 +401,36 @@ export async function formatHomeFind(
     }
     const status = await readWindowsHostStatus();
     lines.push(formatHostFind(status, { query, limit }));
+    return lines.join("\n");
+  }
+
+  if (area === "storage") {
+    if (!hostAllowed) {
+      lines.push('- Storage search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const status = await readWindowsHostStatus();
+    lines.push(formatStorageFind(status, { query, limit }));
+    return lines.join("\n");
+  }
+
+  if (area === "backup") {
+    if (!hostAllowed) {
+      lines.push('- Backup search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const status = await readWindowsHostStatus();
+    lines.push(formatBackupFind(status, { query, limit }));
+    return lines.join("\n");
+  }
+
+  if (area === "network") {
+    if (!hostAllowed) {
+      lines.push('- Network search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const status = await readWindowsHostStatus();
+    lines.push(formatNetworkFind(status, { query, limit }));
     return lines.join("\n");
   }
 
@@ -394,6 +503,9 @@ export async function formatHomeFind(
   ]);
 
   const dockerText = formatDockerFind(hostStatus, { query, limit });
+  const storageText = hostAllowed ? formatStorageFind(hostStatus, { query, limit }) : "";
+  const backupText = hostAllowed ? formatBackupFind(hostStatus, { query, limit }) : "";
+  const networkText = hostAllowed ? formatNetworkFind(hostStatus, { query, limit }) : "";
   const plexResult = findPlex(plexIndex, { query, limit });
   const homelabMatches =
     homelabAllowed && homelabStatus
@@ -433,6 +545,24 @@ export async function formatHomeFind(
     }
   }
 
+  if (hostAllowed && storageText && !storageText.includes("- No disks or scanned folders matched that query.")) {
+    lines.push("Storage:");
+    lines.push(storageText);
+    lines.push("");
+  }
+
+  if (hostAllowed && backupText && !backupText.includes("- No backup tasks matched that query.")) {
+    lines.push("Backups:");
+    lines.push(backupText);
+    lines.push("");
+  }
+
+  if (hostAllowed && networkText && !networkText.includes("- No endpoint checks, Tailscale peers, or exposure items matched that query.")) {
+    lines.push("Network:");
+    lines.push(networkText);
+    lines.push("");
+  }
+
   if (notesAllowed && noteText && !noteText.includes("- No notes matched that query.")) {
     lines.push("Notes:");
     lines.push(noteText);
@@ -458,8 +588,96 @@ export async function formatHomeFind(
   }
 
   if (lines.length <= 3) {
-    lines.push("- No Plex, Docker, host, file, repo, note, or homelab matches were found for that query.");
+    lines.push("- No Plex, Docker, host, storage, backup, network, file, repo, note, or homelab matches were found for that query.");
   }
 
   return lines.join("\n").trimEnd();
+}
+
+export async function formatDailyDigest(profile: ToolProfile) {
+  const [snapshotOverview, hostStatus] = await Promise.all([readSnapshotOverview(), readWindowsHostStatus()]);
+  const repoSnapshot = profile === "full" ? await readRepoStatusSnapshot().catch(() => null) : null;
+  const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty).length : 0;
+  const lowSpaceDisks = profile === "full"
+    ? (hostStatus.resources?.disks ?? []).filter((disk) => (disk.percentFree ?? 100) <= (hostStatus.storage?.lowSpaceThresholdPercent ?? 15))
+    : [];
+  const backupIssues = profile === "full" ? (hostStatus.backups?.tasks ?? []).filter((task) => task.issue !== "none") : [];
+  const unhealthyEndpoints = profile === "full" ? (hostStatus.endpointChecks ?? []).filter((endpoint) => !endpoint.healthy) : [];
+  const dockerProblems = hostStatus.docker?.problemCount ?? 0;
+  const plexReachable = hostStatus.plex?.reachable ?? false;
+  const lines = [
+    `Daily digest: ${new Date().toISOString()}`,
+    "",
+    formatSnapshotHeadline(snapshotOverview),
+    "",
+    "Headline:",
+    `- Docker problems: ${dockerProblems}`,
+    `- Plex reachable: ${plexReachable ? "yes" : "no"}`,
+    `- Snapshot freshness: ${snapshotOverview.overallFreshness}`,
+    profile === "full" ? `- Low-space disks: ${lowSpaceDisks.length}` : "",
+    profile === "full" ? `- Backup issues: ${backupIssues.length}` : "",
+    profile === "full" ? `- Unhealthy endpoints: ${unhealthyEndpoints.length}` : "",
+    profile === "full" && repoSnapshot ? `- Dirty repos: ${dirtyRepos}` : ""
+  ].filter(Boolean);
+
+  lines.push("");
+  lines.push("What needs attention:");
+  const attention: string[] = [];
+  if (snapshotOverview.overallFreshness !== "fresh") {
+    attention.push("Snapshot data is not fully fresh.");
+  }
+  if (dockerProblems > 0) {
+    attention.push(`${dockerProblems} Docker problems were detected.`);
+  }
+  if (profile === "full" && lowSpaceDisks.length > 0) {
+    attention.push(`${lowSpaceDisks.length} disks are below the free-space threshold.`);
+  }
+  if (profile === "full" && backupIssues.length > 0) {
+    attention.push(`${backupIssues.length} backup tasks need follow-up.`);
+  }
+  if (profile === "full" && unhealthyEndpoints.length > 0) {
+    attention.push(`${unhealthyEndpoints.length} endpoint checks are unhealthy.`);
+  }
+  if (profile === "full" && dirtyRepos > 0) {
+    attention.push(`${dirtyRepos} local repos are dirty.`);
+  }
+  if (!plexReachable) {
+    attention.push("Plex is not reachable from the host snapshot.");
+  }
+
+  if (attention.length === 0) {
+    lines.push("- Nothing urgent stands out in the latest snapshots.");
+  } else {
+    for (const item of attention) {
+      lines.push(`- ${item}`);
+    }
+  }
+
+  lines.push("");
+  lines.push("Recommended next checks:");
+  const actions: string[] = [];
+  if (snapshotOverview.overallFreshness !== "fresh") {
+    actions.push("get_snapshot_recommendations");
+  }
+  if (dockerProblems > 0) {
+    actions.push("get_docker_triage_report");
+  }
+  if (profile === "full" && lowSpaceDisks.length > 0) {
+    actions.push("find_low_space_locations");
+  }
+  if (profile === "full" && backupIssues.length > 0) {
+    actions.push("find_failed_backups");
+  }
+  if (profile === "full" && unhealthyEndpoints.length > 0) {
+    actions.push("check_endpoint_health");
+  }
+  if (actions.length === 0) {
+    lines.push("- No follow-up commands are strongly indicated right now.");
+  } else {
+    for (const action of actions) {
+      lines.push(`- ${action}`);
+    }
+  }
+
+  return lines.join("\n");
 }

@@ -16,6 +16,7 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
 - one shared tool registry with both `stdio` and HTTP transports
 - Windows host refresh scripts for Docker Desktop, Plex, and Corsair iCUE status
 - Windows service, scheduled task, and listening-port visibility from host snapshots
+- storage, backup, endpoint-health, Tailscale, and public-exposure summaries from the same host snapshot
 - snapshot freshness reporting, run history, and stale-data recommendations
 - natural-language entrypoints for home, host, Docker, notes, Plex, files, and repos
 - a searchable exported Plex library index plus live Plex activity snapshots
@@ -49,6 +50,8 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `get_snapshot_recommendations`
   - `get_operations_dashboard`
   - `get_attention_report`
+  - `get_daily_digest`
+  - `summarize_system_state`
 - Host and notes:
   - `ping`
   - `get_time`
@@ -57,6 +60,15 @@ The project is aimed at a home Windows machine with Docker Desktop and Plex, but
   - `get_host_resources`
   - `list_host_disks`
   - `get_host_network_summary`
+  - `get_storage_health`
+  - `find_low_space_locations`
+  - `list_large_folders`
+  - `get_backup_status`
+  - `find_failed_backups`
+  - `check_endpoint_health`
+  - `get_dns_summary`
+  - `get_tailscale_status`
+  - `get_public_exposure_summary`
   - `list_windows_services`
   - `get_windows_service_details`
   - `get_windows_service_issues`
@@ -84,6 +96,8 @@ For natural requests:
 - start with `find_home` when you are not sure whether the answer lives in Plex, Docker, host, files, repos, notes, or homelab data
 - start with `find_host` for Windows-machine questions like `memory`, `C:`, `ethernet`, `tailscale`, `backup`, or `32400`
 - start with `find_plex` for Plex-first lookups like `Sopranos`, `Sopranos season 2`, or `Pine Barrens`
+- use `summarize_system_state` when you want one top-level host, Docker, Plex, storage, backup, and exposure rollup
+- use `get_daily_digest` when you want the shortest "what changed and what needs attention" version
 - use `get_snapshot_status` when results feel old or inconsistent
 - use `get_snapshot_recommendations` when you want the likely cause of stale or incomplete data
 
@@ -242,6 +256,7 @@ mcp-home/
    - `npm run build`
    - `npm run typecheck:scripts`
    - `npm run smoke:stdio`
+   - `npm run smoke:stdio:public-safe`
    - `npm run smoke:http`
 
 If you only want local Claude or another local `stdio` client, you can stop here. You do not need Caddy, Tailscale, ChatGPT OAuth, or separate API keys for that local-only path.
@@ -288,6 +303,8 @@ That script:
 
 The current implementation expects Python 3 on the Windows host for the Plex database export. The MCP server stays read-only and only reads the generated JSON files.
 
+Important: the PowerShell refresh script now also reads `.env` before it resolves snapshot settings. That means storage scan roots, backup keywords, endpoint checks, Tailscale path overrides, file roots, and repo roots can all live in `.env` instead of needing to be exported manually in the shell first.
+
 Once you have refreshed the host data, these tools become useful:
 
 - `list_home_commands`
@@ -296,6 +313,8 @@ Once you have refreshed the host data, these tools become useful:
 - `get_snapshot_recommendations`
 - `get_operations_dashboard`
 - `get_attention_report`
+- `get_daily_digest`
+- `summarize_system_state`
 - `find_home`
 - `find_host`
 - `find_docker`
@@ -308,6 +327,15 @@ Once you have refreshed the host data, these tools become useful:
 - `get_host_resources`
 - `list_host_disks`
 - `get_host_network_summary`
+- `get_storage_health`
+- `find_low_space_locations`
+- `list_large_folders`
+- `get_backup_status`
+- `find_failed_backups`
+- `check_endpoint_health`
+- `get_dns_summary`
+- `get_tailscale_status`
+- `get_public_exposure_summary`
 - `list_windows_services`
 - `get_windows_service_details`
 - `get_windows_service_issues`
@@ -422,6 +450,8 @@ For day-to-day use, these are the easiest broad entrypoints:
 - `find_docker` for containers, projects, images, networks, and volumes
 - `find_notes` for local markdown notes
 - `find_plex` for Plex-first searches
+- `summarize_system_state` for the shortest single system rollup
+- `get_daily_digest` for the shortest "what changed and what needs follow-up" view
 - `get_operations_dashboard` for one quick operational overview
 - `get_attention_report` when you want the shortest list of things that need follow-up
 
@@ -440,6 +470,15 @@ FILE_INDEX_MAX_FILES=500
 FILE_INDEX_PREVIEW_CHARS=2000
 REPO_SCAN_ROOTS=.
 REPO_SCAN_MAX_DEPTH=4
+STORAGE_SCAN_ROOTS=.
+STORAGE_SCAN_CHILD_LIMIT=15
+STORAGE_LOW_SPACE_PERCENT=15
+BACKUP_TASK_KEYWORDS=backup,file history,filehistory,regidlebackup,veeam,archive,robocopy,clone
+BACKUP_STALE_HOURS=48
+NETWORK_ENDPOINT_CHECKS=
+NETWORK_CHECK_TIMEOUT_SECONDS=5
+TAILSCALE_EXE=
+MCP_HEALTH_URL=
 ```
 
 The defaults are conservative:
@@ -449,6 +488,14 @@ The defaults are conservative:
 - both outputs are refreshed only during `npm run refresh:host`
 
 If you widen these roots, keep them intentional. The point is a useful allowlist, not broad filesystem exposure.
+
+Notes:
+
+- `STORAGE_SCAN_ROOTS` controls which folders are scanned for the large-folder and low-space reports.
+- `BACKUP_TASK_KEYWORDS` controls which scheduled tasks count as backup-related.
+- `NETWORK_ENDPOINT_CHECKS` lets you define extra endpoint probes in the refresh step. Leave it blank to keep the built-in defaults.
+- `TAILSCALE_EXE` is only needed if Tailscale is installed somewhere non-standard on Windows.
+- `MCP_HEALTH_URL` is optional and only affects the smoke-test target selection.
 
 ## Model API checks
 

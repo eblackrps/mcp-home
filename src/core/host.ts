@@ -186,6 +186,109 @@ export type HostResources = {
   network: HostNetworkStatus;
 };
 
+export type ScannedFolderSummary = {
+  root: string;
+  path: string;
+  name: string;
+  depth: number;
+  totalBytes: number;
+  fileCount: number;
+  directoryCount: number;
+  lastModified?: string | null;
+  drive?: string | null;
+  error?: string | null;
+};
+
+export type HostStorageStatus = {
+  generatedAt: string;
+  scanRoots: string[];
+  childLimit: number;
+  lowSpaceThresholdPercent: number;
+  scannedFolders: ScannedFolderSummary[];
+};
+
+export type BackupTaskStatus = {
+  name: string;
+  path: string;
+  displayPath: string;
+  state: string;
+  enabled: boolean;
+  lastRunTime?: string | null;
+  nextRunTime?: string | null;
+  lastTaskResult?: number | null;
+  stale: boolean;
+  issue: "none" | "warning" | "failure";
+  reasons: string[];
+  actions?: string[];
+};
+
+export type HostBackupStatus = {
+  generatedAt: string;
+  staleAfterHours: number;
+  taskKeywords: string[];
+  taskCount: number;
+  healthyCount: number;
+  warningCount: number;
+  failureCount: number;
+  tasks: BackupTaskStatus[];
+};
+
+export type EndpointHealthStatus = {
+  name: string;
+  url: string;
+  healthy: boolean;
+  statusCode?: number | null;
+  statusText?: string | null;
+  latencyMs?: number | null;
+  checkedAt: string;
+  error?: string | null;
+};
+
+export type TailscalePeerStatus = {
+  name: string;
+  dnsName?: string | null;
+  os?: string | null;
+  online?: boolean | null;
+  active?: boolean | null;
+  tailnetIps?: string[];
+};
+
+export type TailscaleStatus = {
+  installed: boolean;
+  checkedAt: string;
+  version?: string | null;
+  backendState?: string | null;
+  tailnetName?: string | null;
+  magicDnsEnabled?: boolean | null;
+  magicDnsSuffix?: string | null;
+  selfHostName?: string | null;
+  selfDnsName?: string | null;
+  selfOnline?: boolean | null;
+  tailscaleIps?: string[];
+  peerCount?: number | null;
+  onlinePeerCount?: number | null;
+  activePeerCount?: number | null;
+  funnelEnabled?: boolean | null;
+  serveEnabled?: boolean | null;
+  funnelTargets?: string[];
+  serveTargets?: string[];
+  peers?: TailscalePeerStatus[];
+};
+
+export type PublicExposureItem = {
+  kind: "funnel" | "serve" | "docker-public" | "docker-host-ip" | "endpoint";
+  label: string;
+  target?: string | null;
+  details?: string | null;
+};
+
+export type PublicExposureStatus = {
+  generatedAt: string;
+  funnelEnabled: boolean;
+  serveEnabled: boolean;
+  exposedItems: PublicExposureItem[];
+};
+
 export type DockerStatus = {
   available: boolean;
   cliVersion?: string | null;
@@ -228,6 +331,11 @@ export type WindowsHostStatus = {
   services?: WindowsServiceStatus[];
   scheduledTasks?: ScheduledTaskStatus[];
   listeningPorts?: ListeningPortStatus[];
+  storage?: HostStorageStatus;
+  backups?: HostBackupStatus;
+  endpointChecks?: EndpointHealthStatus[];
+  tailscale?: TailscaleStatus;
+  publicExposure?: PublicExposureStatus;
   docker?: DockerStatus;
   plex?: PlexStatus;
 };
@@ -482,6 +590,185 @@ function assertHostNetworkStatus(value: unknown): asserts value is HostNetworkSt
   }
 }
 
+function assertScannedFolderSummary(value: unknown): asserts value is ScannedFolderSummary {
+  if (!value || typeof value !== "object") {
+    throw new Error("Scanned folder entries must be objects");
+  }
+
+  const candidate = value as Partial<ScannedFolderSummary>;
+  if (
+    typeof candidate.root !== "string" ||
+    typeof candidate.path !== "string" ||
+    typeof candidate.name !== "string" ||
+    typeof candidate.depth !== "number" ||
+    typeof candidate.totalBytes !== "number" ||
+    typeof candidate.fileCount !== "number" ||
+    typeof candidate.directoryCount !== "number"
+  ) {
+    throw new Error("Scanned folder entries are missing required fields");
+  }
+}
+
+function assertHostStorageStatus(value: unknown): asserts value is HostStorageStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host storage status must be an object");
+  }
+
+  const candidate = value as Partial<HostStorageStatus>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    !Array.isArray(candidate.scanRoots) ||
+    typeof candidate.childLimit !== "number" ||
+    typeof candidate.lowSpaceThresholdPercent !== "number" ||
+    !Array.isArray(candidate.scannedFolders)
+  ) {
+    throw new Error("Host storage status is missing required fields");
+  }
+
+  for (const folder of candidate.scannedFolders) {
+    assertScannedFolderSummary(folder);
+  }
+}
+
+function assertBackupTaskStatus(value: unknown): asserts value is BackupTaskStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Backup task entries must be objects");
+  }
+
+  const candidate = value as Partial<BackupTaskStatus>;
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.path !== "string" ||
+    typeof candidate.displayPath !== "string" ||
+    typeof candidate.state !== "string" ||
+    typeof candidate.enabled !== "boolean" ||
+    typeof candidate.stale !== "boolean" ||
+    typeof candidate.issue !== "string" ||
+    !Array.isArray(candidate.reasons)
+  ) {
+    throw new Error("Backup task entries are missing required fields");
+  }
+}
+
+function assertHostBackupStatus(value: unknown): asserts value is HostBackupStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Host backup status must be an object");
+  }
+
+  const candidate = value as Partial<HostBackupStatus>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    typeof candidate.staleAfterHours !== "number" ||
+    !Array.isArray(candidate.taskKeywords) ||
+    typeof candidate.taskCount !== "number" ||
+    typeof candidate.healthyCount !== "number" ||
+    typeof candidate.warningCount !== "number" ||
+    typeof candidate.failureCount !== "number" ||
+    !Array.isArray(candidate.tasks)
+  ) {
+    throw new Error("Host backup status is missing required fields");
+  }
+
+  for (const task of candidate.tasks) {
+    assertBackupTaskStatus(task);
+  }
+}
+
+function assertEndpointHealthStatus(value: unknown): asserts value is EndpointHealthStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Endpoint health entries must be objects");
+  }
+
+  const candidate = value as Partial<EndpointHealthStatus>;
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.url !== "string" ||
+    typeof candidate.healthy !== "boolean" ||
+    typeof candidate.checkedAt !== "string"
+  ) {
+    throw new Error("Endpoint health entries are missing required fields");
+  }
+}
+
+function assertTailscalePeerStatus(value: unknown): asserts value is TailscalePeerStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Tailscale peer entries must be objects");
+  }
+
+  const candidate = value as Partial<TailscalePeerStatus>;
+  if (typeof candidate.name !== "string") {
+    throw new Error("Tailscale peer entries are missing required fields");
+  }
+
+  if (candidate.tailnetIps !== undefined && !Array.isArray(candidate.tailnetIps)) {
+    throw new Error("Tailscale peer tailnetIps must be an array when present");
+  }
+}
+
+function assertTailscaleStatus(value: unknown): asserts value is TailscaleStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Tailscale status must be an object");
+  }
+
+  const candidate = value as Partial<TailscaleStatus>;
+  if (typeof candidate.installed !== "boolean" || typeof candidate.checkedAt !== "string") {
+    throw new Error("Tailscale status is missing required fields");
+  }
+
+  if (candidate.tailscaleIps !== undefined && !Array.isArray(candidate.tailscaleIps)) {
+    throw new Error("Tailscale IPs must be an array when present");
+  }
+
+  if (candidate.funnelTargets !== undefined && !Array.isArray(candidate.funnelTargets)) {
+    throw new Error("Tailscale funnel targets must be an array when present");
+  }
+
+  if (candidate.serveTargets !== undefined && !Array.isArray(candidate.serveTargets)) {
+    throw new Error("Tailscale serve targets must be an array when present");
+  }
+
+  if (candidate.peers !== undefined) {
+    if (!Array.isArray(candidate.peers)) {
+      throw new Error("Tailscale peers must be an array when present");
+    }
+
+    for (const peer of candidate.peers) {
+      assertTailscalePeerStatus(peer);
+    }
+  }
+}
+
+function assertPublicExposureItem(value: unknown): asserts value is PublicExposureItem {
+  if (!value || typeof value !== "object") {
+    throw new Error("Public exposure entries must be objects");
+  }
+
+  const candidate = value as Partial<PublicExposureItem>;
+  if (typeof candidate.kind !== "string" || typeof candidate.label !== "string") {
+    throw new Error("Public exposure entries are missing required fields");
+  }
+}
+
+function assertPublicExposureStatus(value: unknown): asserts value is PublicExposureStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Public exposure status must be an object");
+  }
+
+  const candidate = value as Partial<PublicExposureStatus>;
+  if (
+    typeof candidate.generatedAt !== "string" ||
+    typeof candidate.funnelEnabled !== "boolean" ||
+    typeof candidate.serveEnabled !== "boolean" ||
+    !Array.isArray(candidate.exposedItems)
+  ) {
+    throw new Error("Public exposure status is missing required fields");
+  }
+
+  for (const item of candidate.exposedItems) {
+    assertPublicExposureItem(item);
+  }
+}
+
 function assertHostResources(value: unknown): asserts value is HostResources {
   if (!value || typeof value !== "object") {
     throw new Error("Host resources must be an object");
@@ -671,6 +958,32 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
     for (const port of candidate.listeningPorts) {
       assertListeningPortStatus(port);
     }
+  }
+
+  if (candidate.storage !== undefined) {
+    assertHostStorageStatus(candidate.storage);
+  }
+
+  if (candidate.backups !== undefined) {
+    assertHostBackupStatus(candidate.backups);
+  }
+
+  if (candidate.endpointChecks !== undefined) {
+    if (!Array.isArray(candidate.endpointChecks)) {
+      throw new Error("Endpoint checks must be an array when present");
+    }
+
+    for (const endpoint of candidate.endpointChecks) {
+      assertEndpointHealthStatus(endpoint);
+    }
+  }
+
+  if (candidate.tailscale !== undefined) {
+    assertTailscaleStatus(candidate.tailscale);
+  }
+
+  if (candidate.publicExposure !== undefined) {
+    assertPublicExposureStatus(candidate.publicExposure);
   }
 
   if (candidate.docker !== undefined) {
@@ -931,6 +1244,36 @@ export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilt
   }
 
   if (status.services || status.scheduledTasks || status.listeningPorts) {
+    lines.push("");
+  }
+
+  if (status.storage) {
+    const lowSpaceDisks = (status.resources?.disks ?? []).filter(
+      (disk) => (disk.percentFree ?? 100) <= status.storage!.lowSpaceThresholdPercent
+    );
+    lines.push(
+      `Storage scan: ${status.storage.scannedFolders.length} folders | threshold ${status.storage.lowSpaceThresholdPercent}% free | ${lowSpaceDisks.length} low-space disks`
+    );
+  }
+
+  if (status.backups) {
+    lines.push(
+      `Backups: ${status.backups.taskCount} tasks | ${status.backups.failureCount} failures | ${status.backups.warningCount} warnings`
+    );
+  }
+
+  if (status.endpointChecks) {
+    const unhealthyEndpoints = status.endpointChecks.filter((endpoint) => !endpoint.healthy).length;
+    lines.push(`Endpoint checks: ${status.endpointChecks.length} total | ${unhealthyEndpoints} unhealthy`);
+  }
+
+  if (status.tailscale) {
+    lines.push(
+      `Tailscale: ${status.tailscale.backendState || "unknown"} | funnel ${status.tailscale.funnelEnabled ? "on" : "off"} | peers ${status.tailscale.peerCount ?? 0}`
+    );
+  }
+
+  if (status.storage || status.backups || status.endpointChecks || status.tailscale) {
     lines.push("");
   }
 

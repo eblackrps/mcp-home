@@ -1,5 +1,5 @@
 export const SERVER_NAME = "mcp-home";
-export const SERVER_VERSION = "0.5.0";
+export const SERVER_VERSION = "0.6.0";
 
 export type ToolProfile = "full" | "public-safe";
 
@@ -10,6 +10,9 @@ export const REGISTERED_TOOL_NAMES = [
   "list_docker_commands",
   "list_plex_commands",
   "list_windows_commands",
+  "list_storage_commands",
+  "list_backup_commands",
+  "list_network_commands",
   "list_file_commands",
   "list_repo_commands",
   "get_snapshot_status",
@@ -17,6 +20,8 @@ export const REGISTERED_TOOL_NAMES = [
   "get_snapshot_recommendations",
   "get_operations_dashboard",
   "get_attention_report",
+  "get_daily_digest",
+  "summarize_system_state",
   "find_home",
   "find_docker",
   "find_host",
@@ -27,6 +32,15 @@ export const REGISTERED_TOOL_NAMES = [
   "get_host_resources",
   "list_host_disks",
   "get_host_network_summary",
+  "get_storage_health",
+  "find_low_space_locations",
+  "list_large_folders",
+  "get_backup_status",
+  "find_failed_backups",
+  "check_endpoint_health",
+  "get_dns_summary",
+  "get_tailscale_status",
+  "get_public_exposure_summary",
   "list_windows_services",
   "get_windows_service_details",
   "get_windows_service_issues",
@@ -97,6 +111,8 @@ export const PUBLIC_SAFE_TOOL_NAMES = [
   "get_snapshot_history",
   "get_snapshot_recommendations",
   "get_operations_dashboard",
+  "get_daily_digest",
+  "summarize_system_state",
   "find_home",
   "find_docker",
   "find_plex",
@@ -138,8 +154,13 @@ export const CRITICAL_TOOL_NAMES = [
   "get_snapshot_recommendations",
   "get_operations_dashboard",
   "get_attention_report",
+  "get_daily_digest",
+  "summarize_system_state",
   "find_home",
   "find_plex",
+  "get_storage_health",
+  "get_backup_status",
+  "check_endpoint_health",
   "get_docker_status",
   "list_plex_commands",
   "read_note"
@@ -149,6 +170,8 @@ export const PUBLIC_SAFE_CRITICAL_TOOL_NAMES = [
   "get_snapshot_status",
   "get_snapshot_recommendations",
   "get_operations_dashboard",
+  "get_daily_digest",
+  "summarize_system_state",
   "find_home",
   "find_plex",
   "get_docker_status",
