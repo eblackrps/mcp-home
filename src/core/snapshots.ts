@@ -1,9 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { getFileCatalogPath, readFileCatalogSnapshot } from "./files.js";
 import { getWindowsHostStatusPath, readWindowsHostStatus } from "./host.js";
 import { getPlexActivityPath, readPlexActivitySnapshot } from "./plex-activity.js";
 import { getPlexLibraryIndexPath, readPlexLibraryIndex } from "./plex.js";
+import { getRepoStatusPath, readRepoStatusSnapshot } from "./repos.js";
 
 export type SnapshotFreshness = "fresh" | "late" | "stale" | "missing";
 export type SnapshotRunState = "unknown" | "running" | "completed" | "failed";
@@ -39,7 +41,7 @@ type SnapshotStatusFile = {
 };
 
 export type SnapshotFileStatus = {
-  key: "windowsHostStatus" | "plexLibraryIndex" | "plexActivity";
+  key: "windowsHostStatus" | "plexLibraryIndex" | "plexActivity" | "fileCatalog" | "repoStatus";
   label: string;
   path: string;
   exists: boolean;
@@ -91,7 +93,9 @@ const DEFAULT_SNAPSHOT_HISTORY_PATH = path.resolve(
 const DEFAULT_THRESHOLDS_MINUTES = {
   windowsHostStatus: 90,
   plexLibraryIndex: 24 * 60,
-  plexActivity: 90
+  plexActivity: 90,
+  fileCatalog: 90,
+  repoStatus: 90
 } as const;
 
 let cachedStatusFile:
@@ -197,7 +201,11 @@ function getThresholdMinutes(key: keyof typeof DEFAULT_THRESHOLDS_MINUTES) {
       ? "HOST_SNAPSHOT_STALE_MINUTES"
       : key === "plexLibraryIndex"
         ? "PLEX_INDEX_STALE_MINUTES"
-        : "PLEX_ACTIVITY_STALE_MINUTES";
+        : key === "plexActivity"
+          ? "PLEX_ACTIVITY_STALE_MINUTES"
+          : key === "fileCatalog"
+            ? "FILE_CATALOG_STALE_MINUTES"
+            : "REPO_STATUS_STALE_MINUTES";
   const raw = process.env[envVarName];
   if (!raw) {
     return DEFAULT_THRESHOLDS_MINUTES[key];
@@ -369,6 +377,14 @@ export async function readSnapshotOverview(): Promise<SnapshotOverview> {
     buildSnapshotFileStatus("plexActivity", "Plex activity snapshot", getPlexActivityPath(), async () => {
       const snapshot = await readPlexActivitySnapshot();
       return snapshot.fetchedAt;
+    }),
+    buildSnapshotFileStatus("fileCatalog", "File catalog snapshot", getFileCatalogPath(), async () => {
+      const snapshot = await readFileCatalogSnapshot();
+      return snapshot.generatedAt;
+    }),
+    buildSnapshotFileStatus("repoStatus", "Repo status snapshot", getRepoStatusPath(), async () => {
+      const snapshot = await readRepoStatusSnapshot();
+      return snapshot.generatedAt;
     })
   ]);
 
@@ -565,6 +581,8 @@ export function formatSnapshotRecommendations(overview: SnapshotOverview, histor
   const hostFile = fileMap.get("windowsHostStatus");
   const plexIndexFile = fileMap.get("plexLibraryIndex");
   const plexActivityFile = fileMap.get("plexActivity");
+  const fileCatalogFile = fileMap.get("fileCatalog");
+  const repoStatusFile = fileMap.get("repoStatus");
   const warningText = overview.refresh.warnings.join(" ").toLowerCase();
   const errorText = overview.refresh.errors.join(" ").toLowerCase();
 
@@ -595,6 +613,20 @@ export function formatSnapshotRecommendations(overview: SnapshotOverview, histor
   if ((hostFile?.freshness === "stale" || hostFile?.freshness === "missing") && /docker cli was not available/.test(warningText)) {
     likelyCauses.push("Docker snapshot data may be stale because the Docker CLI was unavailable during refresh.");
     recommendations.push("Make sure Docker Desktop is running and the Docker CLI is available in the Windows host environment.");
+  }
+
+  if (fileCatalogFile?.freshness === "missing") {
+    likelyCauses.push("The indexed file catalog has not been generated yet or the configured file catalog path does not exist.");
+    recommendations.push('Run "npm run refresh:host" and confirm FILE_INDEX_ROOTS includes at least one readable path.');
+  } else if (fileCatalogFile?.freshness === "stale") {
+    recommendations.push("The indexed file catalog is stale, so file search and folder summaries may be out of date.");
+  }
+
+  if (repoStatusFile?.freshness === "missing") {
+    likelyCauses.push("The local repo status snapshot has not been generated yet or the configured repo status path does not exist.");
+    recommendations.push('Run "npm run refresh:host" and confirm REPO_SCAN_ROOTS includes one or more local git workspaces.');
+  } else if (repoStatusFile?.freshness === "stale") {
+    recommendations.push("The local repo status snapshot is stale, so repo activity and dirty-state answers may be out of date.");
   }
 
   if (overview.overallFreshness === "late") {

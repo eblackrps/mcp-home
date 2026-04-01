@@ -31,7 +31,18 @@ import {
   formatWindowsHostStatus,
   readWindowsHostStatus
 } from "./host.js";
-import { formatHomeFind, formatNotesFind, formatOperationsDashboardForProfile } from "./home.js";
+import { formatAttentionReport, formatHomeFind, formatNotesFind, formatOperationsDashboardForProfile } from "./home.js";
+import {
+  findIndexedFile,
+  formatFileSearchResults,
+  formatFolderSummary,
+  formatIndexedFileContent,
+  formatRecentFiles,
+  listRecentFiles,
+  readFileCatalogSnapshot,
+  searchFiles,
+  summarizeFolder
+} from "./files.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import {
   browsePlexByGenre,
@@ -87,7 +98,17 @@ import {
   readSnapshotHistory,
   readSnapshotOverview
 } from "./snapshots.js";
+import { formatLocalRepos, formatRecentRepoActivity, formatRepoDetails, readRepoStatusSnapshot } from "./repos.js";
 import { getRegisteredToolNames, SERVER_NAME, SERVER_VERSION, type ToolProfile } from "./server-meta.js";
+import {
+  formatFailedScheduledTasks,
+  formatListeningPorts,
+  formatScheduledTaskDetails,
+  formatScheduledTasks,
+  formatWindowsServiceDetails,
+  formatWindowsServiceIssues,
+  formatWindowsServices
+} from "./windows.js";
 
 const DEFAULT_NOTES_DIR = path.resolve(fileURLToPath(new URL("../../notes", import.meta.url)));
 
@@ -352,6 +373,99 @@ const PLEX_COMMAND_CATALOG: CommandCatalogEntry[] = [
   }
 ];
 
+const WINDOWS_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "list_windows_services",
+    summary: "List Windows services with optional name, state, and start-mode filters.",
+    options: ["query", "state", "startMode", "limit"],
+    example: "list_windows_services state=Running"
+  },
+  {
+    name: "get_windows_service_details",
+    summary: "Inspect one Windows service by name or display name.",
+    options: ["query"],
+    example: "get_windows_service_details query=Tailscale"
+  },
+  {
+    name: "get_windows_service_issues",
+    summary: "Show automatic services that appear stopped in the latest host snapshot.",
+    options: ["limit"],
+    example: "get_windows_service_issues"
+  },
+  {
+    name: "list_scheduled_tasks",
+    summary: "List scheduled tasks with optional query, state, or enabled filters.",
+    options: ["query", "state", "enabled", "limit"],
+    example: "list_scheduled_tasks query=backup"
+  },
+  {
+    name: "get_scheduled_task_details",
+    summary: "Inspect one Windows scheduled task with triggers, actions, and recent run details.",
+    options: ["query"],
+    example: "get_scheduled_task_details query=MCP Home Host Refresh"
+  },
+  {
+    name: "find_failed_tasks",
+    summary: "List scheduled tasks with non-zero last results.",
+    options: ["limit"],
+    example: "find_failed_tasks"
+  },
+  {
+    name: "list_listening_ports",
+    summary: "List listening TCP and UDP ports with process and service names.",
+    options: ["query", "protocol", "port", "limit"],
+    example: "list_listening_ports port=32400"
+  }
+];
+
+const FILE_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "search_files",
+    summary: "Search the indexed allowlisted file catalog by path, name, extension, and stored preview text.",
+    options: ["query", "root", "extension", "limit"],
+    example: "search_files query=backup extension=md"
+  },
+  {
+    name: "list_recent_files",
+    summary: "List recently modified indexed files with optional root or extension filters.",
+    options: ["root", "extension", "limit"],
+    example: "list_recent_files root=notes"
+  },
+  {
+    name: "read_text_file",
+    summary: "Read the stored text preview for one indexed file.",
+    options: ["query"],
+    example: "read_text_file query=homelab.md"
+  },
+  {
+    name: "summarize_folder",
+    summary: "Summarize an indexed folder or path prefix with file counts, top extensions, and recent files.",
+    options: ["query", "limit"],
+    example: "summarize_folder query=notes"
+  }
+];
+
+const REPO_COMMAND_CATALOG: CommandCatalogEntry[] = [
+  {
+    name: "list_local_repos",
+    summary: "List indexed local git repositories with optional query or dirty-state filters.",
+    options: ["query", "dirty", "limit"],
+    example: "list_local_repos dirty=true"
+  },
+  {
+    name: "get_repo_status",
+    summary: "Inspect one local git repository with branch, remote, dirty counts, and last commit info.",
+    options: ["query"],
+    example: "get_repo_status query=MCP@home"
+  },
+  {
+    name: "get_recent_repo_activity",
+    summary: "List repositories ordered by most recent commit activity.",
+    options: ["query", "limit"],
+    example: "get_recent_repo_activity"
+  }
+];
+
 function withGroup(entries: CommandCatalogEntry[], group: string): CommandCatalogEntry[] {
   return entries.map((entry) => ({
     ...entry,
@@ -407,6 +521,12 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     example: "get_operations_dashboard"
   },
   {
+    name: "get_attention_report",
+    group: "snapshot",
+    summary: "Highlight stale snapshots, Docker issues, stopped automatic services, failed tasks, and dirty repos.",
+    example: "get_attention_report"
+  },
+  {
     name: "find_home",
     group: "discovery",
     summary: "Natural cross-domain finder that searches Plex, Docker, host, notes, and homelab data from a single query.",
@@ -423,7 +543,7 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
   {
     name: "find_host",
     group: "host",
-    summary: "Natural host finder for components, CPU and memory, disks, and network adapters.",
+    summary: "Natural host finder for components, resources, disks, network adapters, services, tasks, and ports.",
     options: ["query", "domain", "limit"],
     example: "find_host query=memory"
   },
@@ -461,6 +581,9 @@ const HOME_COMMAND_CATALOG: CommandCatalogEntry[] = [
     options: ["query", "limit"],
     example: "get_host_network_summary query=ethernet"
   },
+  ...withGroup(WINDOWS_COMMAND_CATALOG, "windows"),
+  ...withGroup(FILE_COMMAND_CATALOG, "files"),
+  ...withGroup(REPO_COMMAND_CATALOG, "repos"),
   {
     name: "get_homelab_status",
     group: "host",
@@ -592,6 +715,9 @@ export function createServer(options?: { profile?: ToolProfile }) {
   const visibleHomeCatalog = HOME_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visibleDockerCatalog = DOCKER_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
   const visiblePlexCatalog = PLEX_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleWindowsCatalog = WINDOWS_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleFileCatalog = FILE_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
+  const visibleRepoCatalog = REPO_COMMAND_CATALOG.filter((entry) => allowedToolNames.has(entry.name));
 
   server.tool("ping", "Use this to verify that the MCP server is reachable.", {}, async () => {
     return withAudit("ping", undefined, async () => ({
@@ -615,7 +741,7 @@ export function createServer(options?: { profile?: ToolProfile }) {
     "Use this to list the major MCP commands exposed by this server, with optional area and keyword filters.",
     {
       area: z
-        .enum(["all", "discovery", "snapshot", "host", "docker", "plex", "notes"])
+        .enum(["all", "discovery", "snapshot", "host", "windows", "files", "repos", "docker", "plex", "notes"])
         .optional()
         .describe("Optional command group filter"),
       query: z
@@ -666,6 +792,60 @@ export function createServer(options?: { profile?: ToolProfile }) {
     async ({ query }) => {
       return withAudit("list_plex_commands", { query }, async () => ({
         content: [{ type: "text", text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Plex", visiblePlexCatalog, query)].join("\n") }]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_windows_commands",
+    "Use this to list Windows service, task, and listening-port MCP commands exposed by this server.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example service, task, port, or failed")
+    },
+    async ({ query }) => {
+      return withAudit("list_windows_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Windows", visibleWindowsCatalog, query)].join("\n")
+          }
+        ]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_file_commands",
+    "Use this to list indexed-file and folder MCP commands exposed by this server.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example search, recent, read, or folder")
+    },
+    async ({ query }) => {
+      return withAudit("list_file_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Files", visibleFileCatalog, query)].join("\n")
+          }
+        ]
+      }));
+    }
+  );
+
+  server.tool(
+    "list_repo_commands",
+    "Use this to list local git repository MCP commands exposed by this server.",
+    {
+      query: z.string().min(1).optional().describe("Optional keyword filter, for example dirty, branch, repo, or activity")
+    },
+    async ({ query }) => {
+      return withAudit("list_repo_commands", { query }, async () => ({
+        content: [
+          {
+            type: "text",
+            text: [`Tool profile: ${profile}`, "", formatCommandCatalog("Repos", visibleRepoCatalog, query)].join("\n")
+          }
+        ]
       }));
     }
   );
@@ -764,12 +944,34 @@ export function createServer(options?: { profile?: ToolProfile }) {
   );
 
   server.tool(
+    "get_attention_report",
+    "Use this to highlight stale snapshots, Docker problems, stopped automatic services, failed tasks, and dirty repos.",
+    {},
+    async () => {
+      return withAudit("get_attention_report", undefined, async () => {
+        try {
+          return {
+            content: [{ type: "text", text: await formatAttentionReport(profile) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_attention_report returned error", message);
+          return {
+            content: [{ type: "text", text: `Unable to build the attention report: ${message}` }],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
     "find_home",
-    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, notes, or homelab data.",
+    "Use this as the broad natural-language entrypoint when you are not sure whether the answer lives in Plex, Docker, host, files, repos, notes, or homelab data.",
     {
       query: z.string().min(1).describe("Natural search phrase, for example Sopranos, backups, or mcp-home"),
       area: z
-        .enum(["auto", "docker", "plex", "notes", "homelab", "host"])
+        .enum(["auto", "docker", "plex", "notes", "homelab", "host", "files", "repos"])
         .optional()
         .describe("Optional scope if you already know the area to search"),
       limit: z.number().int().min(1).max(10).optional().describe("Maximum number of top matches to include, from 1 to 10")
@@ -829,11 +1031,11 @@ export function createServer(options?: { profile?: ToolProfile }) {
 
   server.tool(
     "find_host",
-    "Use this as the natural Windows host entrypoint for components, CPU and memory, disks, or network adapters.",
+    "Use this as the natural Windows host entrypoint for components, resources, disks, network adapters, services, tasks, and ports.",
     {
       query: z.string().min(1).describe("Natural host query, for example memory, C:, ethernet, or corsair"),
       domain: z
-        .enum(["auto", "component", "resource", "disk", "network"])
+        .enum(["auto", "component", "resource", "disk", "network", "service", "task", "port"])
         .optional()
         .describe("Optional host scope"),
       limit: z.number().int().min(1).max(25).optional().describe("Maximum number of matches to return, from 1 to 25")
@@ -1070,6 +1272,225 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to read host network summary: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_windows_services",
+    "Use this to list Windows services from the host snapshot, with optional query, state, and start-mode filters.",
+    {
+      query: z.string().min(1).optional().describe("Optional service name, display name, or description filter"),
+      state: z.string().min(1).optional().describe("Optional service state filter, for example Running or Stopped"),
+      startMode: z.string().min(1).optional().describe("Optional start mode filter, for example Auto or Manual"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of services to return, from 1 to 100")
+    },
+    async ({ query, state, startMode, limit }) => {
+      return withAudit("list_windows_services", { query, state, startMode, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatWindowsServices(status, { query, state, startMode, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_windows_services returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list Windows services: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_windows_service_details",
+    "Use this to inspect one Windows service by service name or display name.",
+    {
+      query: z.string().min(1).describe("Service name or display name, for example Tailscale or Docker Desktop Service")
+    },
+    async ({ query }) => {
+      return withAudit("get_windows_service_details", { query }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatWindowsServiceDetails(status, query) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_windows_service_details returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect the Windows service: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_windows_service_issues",
+    "Use this to surface automatic Windows services that appear stopped in the latest host snapshot.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of stopped automatic services to return, from 1 to 100")
+    },
+    async ({ limit }) => {
+      return withAudit("get_windows_service_issues", { limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatWindowsServiceIssues(status, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_windows_service_issues returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect Windows service issues: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_scheduled_tasks",
+    "Use this to list Windows scheduled tasks with optional query, state, and enabled filters.",
+    {
+      query: z.string().min(1).optional().describe("Optional task name, path, description, or action filter"),
+      state: z.string().min(1).optional().describe("Optional task state filter"),
+      enabled: z.boolean().optional().describe("Optional enabled or disabled filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of scheduled tasks to return, from 1 to 100")
+    },
+    async ({ query, state, enabled, limit }) => {
+      return withAudit("list_scheduled_tasks", { query, state, enabled, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatScheduledTasks(status, { query, state, enabled, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_scheduled_tasks returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list scheduled tasks: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_scheduled_task_details",
+    "Use this to inspect one Windows scheduled task with its actions, triggers, and recent run details.",
+    {
+      query: z.string().min(1).describe("Task name or full task path, for example MCP Home Host Refresh")
+    },
+    async ({ query }) => {
+      return withAudit("get_scheduled_task_details", { query }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatScheduledTaskDetails(status, query) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_scheduled_task_details returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect the scheduled task: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "find_failed_tasks",
+    "Use this to list scheduled tasks with non-zero last results in the latest host snapshot.",
+    {
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of failed tasks to return, from 1 to 100")
+    },
+    async ({ limit }) => {
+      return withAudit("find_failed_tasks", { limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatFailedScheduledTasks(status, { limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool find_failed_tasks returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list failed scheduled tasks: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_listening_ports",
+    "Use this to list listening TCP and UDP ports from the Windows host snapshot, including process and service names.",
+    {
+      query: z.string().min(1).optional().describe("Optional process, service, address, or port search term"),
+      protocol: z.enum(["tcp", "udp"]).optional().describe("Optional protocol filter"),
+      port: z.number().int().min(1).max(65535).optional().describe("Optional exact local port filter"),
+      limit: z.number().int().min(1).max(200).optional().describe("Maximum number of listening ports to return, from 1 to 200")
+    },
+    async ({ query, protocol, port, limit }) => {
+      return withAudit("list_listening_ports", { query, protocol, port, limit }, async () => {
+        try {
+          const status = await readWindowsHostStatus();
+          return {
+            content: [{ type: "text", text: formatListeningPorts(status, { query, protocol, port, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_listening_ports returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list listening ports: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true
@@ -2418,6 +2839,236 @@ export function createServer(options?: { profile?: ToolProfile }) {
               {
                 type: "text",
                 text: `Unable to read recent Plex additions: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "search_files",
+    "Use this to search the indexed allowlisted file catalog by path, name, extension, and stored preview text.",
+    {
+      query: z.string().min(1).describe("Keyword or path fragment to search for in indexed files"),
+      root: z.string().min(1).optional().describe("Optional indexed root or relative path prefix filter"),
+      extension: z.string().min(1).optional().describe("Optional file extension filter, for example md or .json"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of indexed files to return, from 1 to 100")
+    },
+    async ({ query, root, extension, limit }) => {
+      return withAudit("search_files", { query, root, extension, limit }, async () => {
+        try {
+          const snapshot = await readFileCatalogSnapshot();
+          const results = searchFiles(snapshot, { query, root, extension, limit });
+          return {
+            content: [{ type: "text", text: formatFileSearchResults(snapshot, results, { query, root, extension, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool search_files returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to search indexed files: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_recent_files",
+    "Use this to list recently modified indexed files with optional root or extension filters.",
+    {
+      root: z.string().min(1).optional().describe("Optional indexed root or path prefix filter"),
+      extension: z.string().min(1).optional().describe("Optional file extension filter, for example md or .log"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of indexed files to return, from 1 to 100")
+    },
+    async ({ root, extension, limit }) => {
+      return withAudit("list_recent_files", { root, extension, limit }, async () => {
+        try {
+          const snapshot = await readFileCatalogSnapshot();
+          const items = listRecentFiles(snapshot, { root, extension, limit });
+          return {
+            content: [{ type: "text", text: formatRecentFiles(snapshot, items, { root, extension, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_recent_files returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list recent indexed files: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "read_text_file",
+    "Use this to read the stored preview for one indexed text file.",
+    {
+      query: z.string().min(1).describe("Indexed file name, relative path, or full path")
+    },
+    async ({ query }) => {
+      return withAudit("read_text_file", { query }, async () => {
+        try {
+          const snapshot = await readFileCatalogSnapshot();
+          const item = findIndexedFile(snapshot, query);
+          if (!item) {
+            return {
+              content: [{ type: "text", text: `Generated: ${snapshot.generatedAt}\nIndexed file preview:\n\n- No indexed file matched "${query}".` }],
+              isError: true
+            };
+          }
+
+          return {
+            content: [{ type: "text", text: formatIndexedFileContent(snapshot, item) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool read_text_file returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to read the indexed file preview: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "summarize_folder",
+    "Use this to summarize an indexed folder or path prefix with file counts, top extensions, and recent files.",
+    {
+      query: z.string().min(1).describe("Indexed root or relative path prefix to summarize"),
+      limit: z.number().int().min(1).max(50).optional().describe("Maximum number of recent files to include, from 1 to 50")
+    },
+    async ({ query, limit }) => {
+      return withAudit("summarize_folder", { query, limit }, async () => {
+        try {
+          const snapshot = await readFileCatalogSnapshot();
+          const summary = summarizeFolder(snapshot, query, limit);
+          return {
+            content: [{ type: "text", text: formatFolderSummary(snapshot, summary) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool summarize_folder returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to summarize the indexed folder: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "list_local_repos",
+    "Use this to list indexed local git repositories with optional query or dirty-state filters.",
+    {
+      query: z.string().min(1).optional().describe("Optional repo name, path, branch, or remote filter"),
+      dirty: z.boolean().optional().describe("Optional dirty or clean filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of repos to return, from 1 to 100")
+    },
+    async ({ query, dirty, limit }) => {
+      return withAudit("list_local_repos", { query, dirty, limit }, async () => {
+        try {
+          const snapshot = await readRepoStatusSnapshot();
+          return {
+            content: [{ type: "text", text: formatLocalRepos(snapshot, { query, dirty, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool list_local_repos returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to list local repos: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_repo_status",
+    "Use this to inspect one local git repository with branch, remote, dirty counts, and last commit information.",
+    {
+      query: z.string().min(1).describe("Repo name or path, for example MCP@home")
+    },
+    async ({ query }) => {
+      return withAudit("get_repo_status", { query }, async () => {
+        try {
+          const snapshot = await readRepoStatusSnapshot();
+          return {
+            content: [{ type: "text", text: formatRepoDetails(snapshot, query) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_repo_status returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect the local repo: ${message}. Run "npm run refresh:host" on the Windows host first.`
+              }
+            ],
+            isError: true
+          };
+        }
+      });
+    }
+  );
+
+  server.tool(
+    "get_recent_repo_activity",
+    "Use this to list indexed local git repositories ordered by most recent commit activity.",
+    {
+      query: z.string().min(1).optional().describe("Optional repo name, path, or branch filter"),
+      limit: z.number().int().min(1).max(100).optional().describe("Maximum number of repos to return, from 1 to 100")
+    },
+    async ({ query, limit }) => {
+      return withAudit("get_recent_repo_activity", { query, limit }, async () => {
+        try {
+          const snapshot = await readRepoStatusSnapshot();
+          return {
+            content: [{ type: "text", text: formatRecentRepoActivity(snapshot, { query, limit }) }]
+          };
+        } catch (error) {
+          const message = error instanceof Error ? error.message : "Unknown error";
+          log("tool get_recent_repo_activity returned error", message);
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Unable to inspect recent repo activity: ${message}. Run "npm run refresh:host" on the Windows host first.`
               }
             ],
             isError: true

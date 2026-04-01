@@ -1,5 +1,5 @@
 export const SERVER_NAME = "mcp-home";
-export const SERVER_VERSION = "0.4.0";
+export const SERVER_VERSION = "0.5.0";
 
 export type ToolProfile = "full" | "public-safe";
 
@@ -9,10 +9,14 @@ export const REGISTERED_TOOL_NAMES = [
   "list_home_commands",
   "list_docker_commands",
   "list_plex_commands",
+  "list_windows_commands",
+  "list_file_commands",
+  "list_repo_commands",
   "get_snapshot_status",
   "get_snapshot_history",
   "get_snapshot_recommendations",
   "get_operations_dashboard",
+  "get_attention_report",
   "find_home",
   "find_docker",
   "find_host",
@@ -23,6 +27,13 @@ export const REGISTERED_TOOL_NAMES = [
   "get_host_resources",
   "list_host_disks",
   "get_host_network_summary",
+  "list_windows_services",
+  "get_windows_service_details",
+  "get_windows_service_issues",
+  "list_scheduled_tasks",
+  "get_scheduled_task_details",
+  "find_failed_tasks",
+  "list_listening_ports",
   "get_docker_status",
   "list_docker_containers",
   "get_docker_projects",
@@ -64,6 +75,13 @@ export const REGISTERED_TOOL_NAMES = [
   "search_plex_titles",
   "list_plex_duplicates",
   "get_recent_plex_additions",
+  "search_files",
+  "list_recent_files",
+  "read_text_file",
+  "summarize_folder",
+  "list_local_repos",
+  "get_repo_status",
+  "get_recent_repo_activity",
   "list_notes",
   "search_notes",
   "read_note"
@@ -119,6 +137,7 @@ export const CRITICAL_TOOL_NAMES = [
   "get_snapshot_status",
   "get_snapshot_recommendations",
   "get_operations_dashboard",
+  "get_attention_report",
   "find_home",
   "find_plex",
   "get_docker_status",

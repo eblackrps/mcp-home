@@ -9,6 +9,41 @@ export type HostComponent = {
   lastChecked: string;
 };
 
+export type WindowsServiceStatus = {
+  name: string;
+  displayName: string;
+  state: string;
+  startMode?: string | null;
+  status?: string | null;
+  processId?: number | null;
+  startName?: string | null;
+  pathName?: string | null;
+  description?: string | null;
+};
+
+export type ScheduledTaskStatus = {
+  name: string;
+  path: string;
+  state: string;
+  enabled: boolean;
+  lastRunTime?: string | null;
+  nextRunTime?: string | null;
+  lastTaskResult?: number | null;
+  author?: string | null;
+  description?: string | null;
+  actions?: string[];
+  triggers?: string[];
+};
+
+export type ListeningPortStatus = {
+  protocol: "tcp" | "udp";
+  localAddress: string;
+  localPort: number;
+  processId?: number | null;
+  processName?: string | null;
+  serviceNames?: string[];
+};
+
 export type PlexLibrarySummary = {
   name: string;
   sectionType: string;
@@ -190,6 +225,9 @@ export type WindowsHostStatus = {
   };
   resources?: HostResources;
   components: HostComponent[];
+  services?: WindowsServiceStatus[];
+  scheduledTasks?: ScheduledTaskStatus[];
+  listeningPorts?: ListeningPortStatus[];
   docker?: DockerStatus;
   plex?: PlexStatus;
 };
@@ -464,6 +502,64 @@ function assertHostResources(value: unknown): asserts value is HostResources {
   assertHostNetworkStatus(candidate.network);
 }
 
+function assertWindowsServiceStatus(value: unknown): asserts value is WindowsServiceStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Windows service entries must be objects");
+  }
+
+  const candidate = value as Partial<WindowsServiceStatus>;
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.displayName !== "string" ||
+    typeof candidate.state !== "string"
+  ) {
+    throw new Error("Windows service entries are missing required fields");
+  }
+}
+
+function assertScheduledTaskStatus(value: unknown): asserts value is ScheduledTaskStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Scheduled task entries must be objects");
+  }
+
+  const candidate = value as Partial<ScheduledTaskStatus>;
+  if (
+    typeof candidate.name !== "string" ||
+    typeof candidate.path !== "string" ||
+    typeof candidate.state !== "string" ||
+    typeof candidate.enabled !== "boolean"
+  ) {
+    throw new Error("Scheduled task entries are missing required fields");
+  }
+
+  if (candidate.actions !== undefined && !Array.isArray(candidate.actions)) {
+    throw new Error("Scheduled task actions must be an array when present");
+  }
+
+  if (candidate.triggers !== undefined && !Array.isArray(candidate.triggers)) {
+    throw new Error("Scheduled task triggers must be an array when present");
+  }
+}
+
+function assertListeningPortStatus(value: unknown): asserts value is ListeningPortStatus {
+  if (!value || typeof value !== "object") {
+    throw new Error("Listening port entries must be objects");
+  }
+
+  const candidate = value as Partial<ListeningPortStatus>;
+  if (
+    (candidate.protocol !== "tcp" && candidate.protocol !== "udp") ||
+    typeof candidate.localAddress !== "string" ||
+    typeof candidate.localPort !== "number"
+  ) {
+    throw new Error("Listening port entries are missing required fields");
+  }
+
+  if (candidate.serviceNames !== undefined && !Array.isArray(candidate.serviceNames)) {
+    throw new Error("Listening port service names must be an array when present");
+  }
+}
+
 function assertDockerStatus(value: unknown): asserts value is DockerStatus {
   if (!value || typeof value !== "object") {
     throw new Error("Docker status must be an object");
@@ -545,6 +641,36 @@ function assertWindowsHostStatus(value: unknown): asserts value is WindowsHostSt
 
   if (candidate.resources !== undefined) {
     assertHostResources(candidate.resources);
+  }
+
+  if (candidate.services !== undefined) {
+    if (!Array.isArray(candidate.services)) {
+      throw new Error("Windows services must be an array when present");
+    }
+
+    for (const service of candidate.services) {
+      assertWindowsServiceStatus(service);
+    }
+  }
+
+  if (candidate.scheduledTasks !== undefined) {
+    if (!Array.isArray(candidate.scheduledTasks)) {
+      throw new Error("Scheduled tasks must be an array when present");
+    }
+
+    for (const task of candidate.scheduledTasks) {
+      assertScheduledTaskStatus(task);
+    }
+  }
+
+  if (candidate.listeningPorts !== undefined) {
+    if (!Array.isArray(candidate.listeningPorts)) {
+      throw new Error("Listening ports must be an array when present");
+    }
+
+    for (const port of candidate.listeningPorts) {
+      assertListeningPortStatus(port);
+    }
   }
 
   if (candidate.docker !== undefined) {
@@ -787,6 +913,24 @@ export function formatWindowsHostStatus(status: WindowsHostStatus, componentFilt
       lines.push(`Network: ${status.resources.network.adapterCount} adapters`);
     }
 
+    lines.push("");
+  }
+
+  if (status.services) {
+    const runningServices = status.services.filter((service) => service.state.toLowerCase() === "running").length;
+    lines.push(`Services: ${status.services.length} total | ${runningServices} running`);
+  }
+
+  if (status.scheduledTasks) {
+    const enabledTasks = status.scheduledTasks.filter((task) => task.enabled).length;
+    lines.push(`Scheduled tasks: ${status.scheduledTasks.length} total | ${enabledTasks} enabled`);
+  }
+
+  if (status.listeningPorts) {
+    lines.push(`Listening ports: ${status.listeningPorts.length}`);
+  }
+
+  if (status.services || status.scheduledTasks || status.listeningPorts) {
     lines.push("");
   }
 
@@ -2613,7 +2757,7 @@ export function formatHostFind(
   status: WindowsHostStatus,
   options: {
     query: string;
-    domain?: "auto" | "component" | "resource" | "disk" | "network";
+    domain?: "auto" | "component" | "resource" | "disk" | "network" | "service" | "task" | "port";
     limit?: number;
   }
 ) {
@@ -2662,6 +2806,44 @@ export function formatHostFind(
               adapter.ipv6.some((value) => value.toLowerCase().includes(query)) ||
               (adapter.gateways?.some((value) => value.toLowerCase().includes(query)) ?? false) ||
               (adapter.dnsServers?.some((value) => value.toLowerCase().includes(query)) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+  const serviceMatches =
+    domain === "auto" || domain === "service"
+      ? (status.services ?? [])
+          .filter(
+            (service) =>
+              service.name.toLowerCase().includes(query) ||
+              service.displayName.toLowerCase().includes(query) ||
+              service.state.toLowerCase().includes(query) ||
+              (service.description?.toLowerCase().includes(query) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+  const taskMatches =
+    domain === "auto" || domain === "task"
+      ? (status.scheduledTasks ?? [])
+          .filter(
+            (task) =>
+              task.name.toLowerCase().includes(query) ||
+              task.path.toLowerCase().includes(query) ||
+              task.state.toLowerCase().includes(query) ||
+              (task.description?.toLowerCase().includes(query) ?? false) ||
+              (task.actions?.some((action) => action.toLowerCase().includes(query)) ?? false)
+          )
+          .slice(0, limit)
+      : [];
+  const portMatches =
+    domain === "auto" || domain === "port"
+      ? (status.listeningPorts ?? [])
+          .filter(
+            (port) =>
+              port.localAddress.toLowerCase().includes(query) ||
+              String(port.localPort).includes(query) ||
+              port.protocol.toLowerCase().includes(query) ||
+              (port.processName?.toLowerCase().includes(query) ?? false) ||
+              (port.serviceNames?.some((serviceName) => serviceName.toLowerCase().includes(query)) ?? false)
           )
           .slice(0, limit)
       : [];
@@ -2714,8 +2896,36 @@ export function formatHostFind(
     lines.push("");
   }
 
+  if (serviceMatches.length > 0) {
+    lines.push("Services:");
+    for (const service of serviceMatches) {
+      lines.push(`- ${service.displayName} (${service.name}) | ${service.state}${service.startMode ? ` | ${service.startMode}` : ""}`);
+    }
+    lines.push("");
+  }
+
+  if (taskMatches.length > 0) {
+    lines.push("Scheduled tasks:");
+    for (const task of taskMatches) {
+      lines.push(`- ${task.path}${task.name} | ${task.state} | ${task.enabled ? "enabled" : "disabled"}`);
+      if (task.lastTaskResult !== null && task.lastTaskResult !== undefined) {
+        lines.push(`  Last result: ${task.lastTaskResult}`);
+      }
+    }
+    lines.push("");
+  }
+
+  if (portMatches.length > 0) {
+    lines.push("Listening ports:");
+    for (const port of portMatches) {
+      const serviceText = port.serviceNames && port.serviceNames.length > 0 ? ` | services=${port.serviceNames.join(", ")}` : "";
+      lines.push(`- ${port.protocol.toUpperCase()} ${port.localAddress}:${port.localPort} | ${port.processName || "unknown"}${serviceText}`);
+    }
+    lines.push("");
+  }
+
   if (lines.length <= 3) {
-    lines.push("- No host components, resources, disks, or network adapters matched that query.");
+    lines.push("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.");
   }
 
   return lines.join("\n").trimEnd();

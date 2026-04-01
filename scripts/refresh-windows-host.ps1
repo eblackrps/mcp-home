@@ -5,6 +5,8 @@ $dataDir = Join-Path $repoRoot "data\local"
 $hostStatusPath = Join-Path $dataDir "windows-host-status.json"
 $plexIndexPath = Join-Path $dataDir "plex-library-index.json"
 $plexActivityPath = Join-Path $dataDir "plex-activity.json"
+$fileCatalogPath = Join-Path $dataDir "file-catalog.json"
+$repoStatusPath = Join-Path $dataDir "repo-status.json"
 $snapshotStatusPath = Join-Path $dataDir "snapshot-status.json"
 $snapshotHistoryPath = Join-Path $dataDir "snapshot-history.json"
 $refreshLockPath = Join-Path $dataDir "refresh-windows-host.lock"
@@ -97,7 +99,7 @@ function Get-RefreshSchedulerInfo {
       state = if ($task.State) { [string]$task.State } else { $null }
       nextRunTime = if ($taskInfo.NextRunTime -and $taskInfo.NextRunTime -gt [datetime]::MinValue) { $taskInfo.NextRunTime.ToUniversalTime().ToString("o") } else { $null }
       lastRunTime = if ($taskInfo.LastRunTime -and $taskInfo.LastRunTime -gt [datetime]::MinValue) { $taskInfo.LastRunTime.ToUniversalTime().ToString("o") } else { $null }
-      lastTaskResult = if ($null -ne $taskInfo.LastTaskResult) { [int]$taskInfo.LastTaskResult } else { $null }
+      lastTaskResult = if ($null -ne $taskInfo.LastTaskResult) { [int64]$taskInfo.LastTaskResult } else { $null }
       intervalMinutes = $intervalMinutes
     }
   } catch {
@@ -324,7 +326,6 @@ function Get-HostResourceSnapshot {
       break
     }
   }
-
   return [ordered]@{
     cpu = [ordered]@{
       name = $cpuName
@@ -346,6 +347,438 @@ function Get-HostResourceSnapshot {
       primaryIpv4 = $primaryIpv4
       adapters = $adapters
     }
+  }
+}
+
+function Resolve-ConfiguredPaths {
+  param(
+    [string]$RawValue,
+    [string[]]$DefaultRelativePaths = @()
+  )
+
+  $candidates = @()
+  if (-not [string]::IsNullOrWhiteSpace($RawValue)) {
+    $candidates = @(
+      $RawValue -split "[;\r\n,]+" |
+        ForEach-Object { $_.Trim() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+  } else {
+    $candidates = @($DefaultRelativePaths)
+  }
+
+  $resolved = New-Object System.Collections.Generic.List[string]
+  foreach ($candidate in $candidates) {
+    $resolvedPath = if ([System.IO.Path]::IsPathRooted($candidate)) {
+      $candidate
+    } else {
+      Join-Path $repoRoot $candidate
+    }
+
+    try {
+      $resolvedValue = (Resolve-Path -Path $resolvedPath -ErrorAction Stop).Path
+      if (-not $resolved.Contains($resolvedValue)) {
+        $resolved.Add($resolvedValue) | Out-Null
+      }
+    } catch {
+    }
+  }
+
+  return @($resolved)
+}
+
+function Test-ExcludedScanPath {
+  param([string]$Path)
+
+  $normalized = $Path.Replace('/', '\').ToLowerInvariant()
+  return (
+    $normalized -like "*\node_modules\*" -or
+    $normalized -like "*\.git\*" -or
+    $normalized -like "*\dist\*" -or
+    $normalized -like "*\data\local\*" -or
+    $normalized -like "*\logs\*" -or
+    $normalized -like "*\state\*" -or
+    $normalized -like "*\bin\*" -or
+    $normalized -like "*\obj\*"
+  )
+}
+
+function Convert-ToRelativePath {
+  param(
+    [string]$Root,
+    [string]$Path
+  )
+
+  try {
+    if ([System.IO.Path].GetMethod("GetRelativePath", [type[]]@([string], [string]))) {
+      return [System.IO.Path]::GetRelativePath($Root, $Path)
+    }
+
+    $rootUri = [System.Uri]::new(($Root.TrimEnd('\') + '\'))
+    $pathUri = [System.Uri]::new($Path)
+    $relative = $rootUri.MakeRelativeUri($pathUri).ToString()
+    return [System.Uri]::UnescapeDataString($relative).Replace('/', '\')
+  } catch {
+    return $Path
+  }
+}
+
+function Get-WindowsServiceSnapshot {
+  return @(
+    Get-CimInstance Win32_Service |
+      Sort-Object DisplayName |
+      ForEach-Object {
+        [ordered]@{
+          name = [string]$_.Name
+          displayName = if ($_.DisplayName) { [string]$_.DisplayName } else { [string]$_.Name }
+          state = if ($_.State) { [string]$_.State } else { "Unknown" }
+          startMode = if ($_.StartMode) { [string]$_.StartMode } else { $null }
+          status = if ($_.Status) { [string]$_.Status } else { $null }
+          processId = if ($null -ne $_.ProcessId) { [int]$_.ProcessId } else { $null }
+          startName = if ($_.StartName) { [string]$_.StartName } else { $null }
+          pathName = if ($_.PathName) { [string]$_.PathName } else { $null }
+          description = if ($_.Description) { [string]$_.Description } else { $null }
+        }
+      }
+  )
+}
+
+function Format-ScheduledTaskAction {
+  param($Action)
+
+  if ($null -eq $Action) {
+    return $null
+  }
+
+  if ($Action.Execute) {
+    $bits = @([string]$Action.Execute)
+    if ($Action.Arguments) {
+      $bits += [string]$Action.Arguments
+    }
+    return ($bits -join " ")
+  }
+
+  if ($Action.ClassId) {
+    return "COM " + [string]$Action.ClassId
+  }
+
+  return $Action.ToString()
+}
+
+function Format-ScheduledTaskTrigger {
+  param($Trigger)
+
+  if ($null -eq $Trigger) {
+    return $null
+  }
+
+  $typeName = if ($Trigger.CimClass -and $Trigger.CimClass.CimClassName) { [string]$Trigger.CimClass.CimClassName } else { "Trigger" }
+  $startBoundary = if ($Trigger.StartBoundary) { [string]$Trigger.StartBoundary } else { $null }
+  $enabled = if ($null -ne $Trigger.Enabled) { [bool]$Trigger.Enabled } else { $null }
+  $bits = @($typeName)
+  if ($startBoundary) {
+    $bits += "starts $startBoundary"
+  }
+  if ($null -ne $enabled) {
+    $bits += $(if ($enabled) { "enabled" } else { "disabled" })
+  }
+  return ($bits -join " | ")
+}
+
+function Get-ScheduledTaskSnapshot {
+  $items = New-Object System.Collections.Generic.List[object]
+  $allTasks = @(Get-ScheduledTask | Sort-Object TaskPath, TaskName)
+
+  foreach ($task in $allTasks) {
+    $taskInfo = $null
+    try {
+      $taskInfo = Get-ScheduledTaskInfo -TaskName $task.TaskName -TaskPath $task.TaskPath -ErrorAction Stop
+    } catch {
+    }
+
+    $actions = @(@($task.Actions) | ForEach-Object { Format-ScheduledTaskAction -Action $_ } | Where-Object { $_ })
+    $triggers = @(@($task.Triggers) | ForEach-Object { Format-ScheduledTaskTrigger -Trigger $_ } | Where-Object { $_ })
+    $enabled = if ($task.Settings -and $null -ne $task.Settings.Enabled) { [bool]$task.Settings.Enabled } else { $true }
+
+    $items.Add([ordered]@{
+        name = [string]$task.TaskName
+        path = [string]$task.TaskPath
+        state = if ($task.State) { [string]$task.State } else { "Unknown" }
+        enabled = $enabled
+        lastRunTime = if ($taskInfo -and $taskInfo.LastRunTime -and $taskInfo.LastRunTime -gt [datetime]::MinValue) { $taskInfo.LastRunTime.ToUniversalTime().ToString("o") } else { $null }
+        nextRunTime = if ($taskInfo -and $taskInfo.NextRunTime -and $taskInfo.NextRunTime -gt [datetime]::MinValue) { $taskInfo.NextRunTime.ToUniversalTime().ToString("o") } else { $null }
+        lastTaskResult = if ($taskInfo -and $null -ne $taskInfo.LastTaskResult) { [int64]$taskInfo.LastTaskResult } else { $null }
+        author = if ($task.Author) { [string]$task.Author } else { $null }
+        description = if ($task.Description) { [string]$task.Description } else { $null }
+        actions = $actions
+        triggers = $triggers
+      }) | Out-Null
+  }
+
+  return $items.ToArray()
+}
+
+function Get-ListeningPortsSnapshot {
+  param([object[]]$Services)
+
+  $processIndex = @{}
+  foreach ($process in @(Get-Process -ErrorAction SilentlyContinue)) {
+    $processIndex[[int]$process.Id] = [string]$process.ProcessName
+  }
+
+  $serviceIndex = @{}
+  foreach ($service in @($Services | Where-Object { $_.processId -and $_.processId -gt 0 })) {
+    $processId = [int]$service.processId
+    if (-not $serviceIndex.ContainsKey($processId)) {
+      $serviceIndex[$processId] = New-Object System.Collections.Generic.List[string]
+    }
+
+    if (-not $serviceIndex[$processId].Contains([string]$service.name)) {
+      $serviceIndex[$processId].Add([string]$service.name) | Out-Null
+    }
+  }
+
+  $records = New-Object System.Collections.Generic.List[object]
+
+  try {
+    foreach ($entry in @(Get-NetTCPConnection -State Listen -ErrorAction Stop)) {
+      $processId = if ($null -ne $entry.OwningProcess) { [int]$entry.OwningProcess } else { $null }
+      $records.Add([ordered]@{
+          protocol = "tcp"
+          localAddress = [string]$entry.LocalAddress
+          localPort = [int]$entry.LocalPort
+          processId = $processId
+          processName = if ($null -ne $processId -and $processIndex.ContainsKey($processId)) { $processIndex[$processId] } else { $null }
+          serviceNames = if ($null -ne $processId -and $serviceIndex.ContainsKey($processId)) { @($serviceIndex[$processId]) } else { @() }
+        }) | Out-Null
+    }
+  } catch {
+  }
+
+  try {
+    foreach ($entry in @(Get-NetUDPEndpoint -ErrorAction Stop)) {
+      $processId = if ($null -ne $entry.OwningProcess) { [int]$entry.OwningProcess } else { $null }
+      $records.Add([ordered]@{
+          protocol = "udp"
+          localAddress = [string]$entry.LocalAddress
+          localPort = [int]$entry.LocalPort
+          processId = $processId
+          processName = if ($null -ne $processId -and $processIndex.ContainsKey($processId)) { $processIndex[$processId] } else { $null }
+          serviceNames = if ($null -ne $processId -and $serviceIndex.ContainsKey($processId)) { @($serviceIndex[$processId]) } else { @() }
+        }) | Out-Null
+    }
+  } catch {
+  }
+
+  return @(
+    $records |
+      Sort-Object protocol, localPort, localAddress |
+      ForEach-Object {
+        [ordered]@{
+          protocol = [string]$_.protocol
+          localAddress = [string]$_.localAddress
+          localPort = [int]$_.localPort
+          processId = if ($null -ne $_.processId) { [int]$_.processId } else { $null }
+          processName = if ($_.processName) { [string]$_.processName } else { $null }
+          serviceNames = @(@($_.serviceNames) | Sort-Object -Unique)
+        }
+      }
+  )
+}
+
+function Get-TextFilePreview {
+  param(
+    [string]$Path,
+    [int]$PreviewChars
+  )
+
+  try {
+    $raw = Get-Content -Path $Path -Raw -ErrorAction Stop
+    if ([string]::IsNullOrEmpty($raw)) {
+      return ""
+    }
+
+    $trimmed = $raw.Trim()
+    if ($trimmed.Length -le $PreviewChars) {
+      return $trimmed
+    }
+
+    return $trimmed.Substring(0, $PreviewChars) + "..."
+  } catch {
+    return $null
+  }
+}
+
+function Get-FileCatalogSnapshot {
+  param(
+    [string[]]$Roots,
+    [string[]]$TextExtensions,
+    [int]$MaxFiles = 500,
+    [int]$PreviewChars = 2000
+  )
+
+  $items = New-Object System.Collections.Generic.List[object]
+  $skippedRoots = New-Object System.Collections.Generic.List[string]
+  foreach ($root in $Roots) {
+    if (-not (Test-Path $root)) {
+      $skippedRoots.Add($root) | Out-Null
+      continue
+    }
+
+    foreach ($file in Get-ChildItem -Path $root -File -Recurse -Force -ErrorAction SilentlyContinue) {
+      if ($items.Count -ge $MaxFiles) {
+        break
+      }
+
+      if (Test-ExcludedScanPath -Path $file.FullName) {
+        continue
+      }
+
+      $extension = if ($file.Extension) { $file.Extension.ToLowerInvariant() } else { "" }
+      $isText = $TextExtensions -contains $extension
+      $preview = if ($isText) { Get-TextFilePreview -Path $file.FullName -PreviewChars $PreviewChars } else { $null }
+      $items.Add([ordered]@{
+          path = [string]$file.FullName
+          root = [string]$root
+          relativePath = Convert-ToRelativePath -Root $root -Path $file.FullName
+          name = [string]$file.Name
+          extension = $extension
+          sizeBytes = [int64]$file.Length
+          modifiedAt = $file.LastWriteTimeUtc.ToString("o")
+          kind = if ($isText) { "text" } else { "binary" }
+          preview = $preview
+        }) | Out-Null
+      }
+    }
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    roots = @($Roots)
+    indexedFileCount = $items.Count
+    skippedRoots = $skippedRoots.ToArray()
+    maxFiles = $MaxFiles
+    items = $items.ToArray()
+  }
+}
+
+function Parse-GitBranchStatus {
+  param([string]$HeaderLine)
+
+  $result = [ordered]@{
+    branch = $null
+    ahead = $null
+    behind = $null
+  }
+
+  if ([string]::IsNullOrWhiteSpace($HeaderLine)) {
+    return $result
+  }
+
+  if ($HeaderLine -match "^##\s+([^\.\s]+)(?:\.\.\.[^\s]+)?(?:\s+\[(.+)\])?") {
+    $result.branch = $Matches[1]
+    $decorators = $Matches[2]
+    if ($decorators) {
+      if ($decorators -match "ahead (\d+)") {
+        $result.ahead = [int]$Matches[1]
+      }
+      if ($decorators -match "behind (\d+)") {
+        $result.behind = [int]$Matches[1]
+      }
+    }
+  }
+
+  return $result
+}
+
+function Get-RepoStatusSnapshot {
+  param(
+    [string[]]$Roots,
+    [int]$MaxDepth = 4
+  )
+
+  $git = Get-Command git -ErrorAction SilentlyContinue
+  if (-not $git) {
+    return [ordered]@{
+      generatedAt = Get-IsoNow
+      roots = @($Roots)
+      repoCount = 0
+      skippedRoots = @($Roots)
+      repos = @()
+    }
+  }
+
+  $repoPaths = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+  $skippedRoots = New-Object System.Collections.Generic.List[string]
+
+  foreach ($root in $Roots) {
+    if (-not (Test-Path $root)) {
+      $skippedRoots.Add($root) | Out-Null
+      continue
+    }
+
+    if (Test-Path (Join-Path $root ".git")) {
+      $null = $repoPaths.Add((Resolve-Path $root).Path)
+    }
+
+    foreach ($gitEntry in Get-ChildItem -Path $root -Force -Recurse -Depth $MaxDepth -Filter ".git" -ErrorAction SilentlyContinue) {
+      if (Test-ExcludedScanPath -Path $gitEntry.FullName) {
+        continue
+      }
+
+      $repoPath = Split-Path -Path $gitEntry.FullName -Parent
+      if (Test-Path $repoPath) {
+        $null = $repoPaths.Add((Resolve-Path $repoPath).Path)
+      }
+    }
+  }
+
+  $repos = New-Object System.Collections.Generic.List[object]
+  foreach ($repoPath in @($repoPaths | Sort-Object)) {
+    $statusLines = @(& $git.Source -C $repoPath status --porcelain=v1 --branch 2>$null)
+    if ($LASTEXITCODE -ne 0) {
+      continue
+    }
+
+    $branchInfo = Parse-GitBranchStatus -HeaderLine $(if ($statusLines.Count -gt 0) { [string]$statusLines[0] } else { $null })
+    $stagedCount = 0
+    $modifiedCount = 0
+    $untrackedCount = 0
+    foreach ($line in @($statusLines | Select-Object -Skip 1)) {
+      $text = [string]$line
+      if ($text.StartsWith("??")) {
+        $untrackedCount += 1
+        continue
+      }
+      if ($text.Length -ge 2) {
+        if ($text[0] -ne ' ') { $stagedCount += 1 }
+        if ($text[1] -ne ' ') { $modifiedCount += 1 }
+      }
+    }
+
+    $remote = @(& $git.Source -C $repoPath remote get-url origin 2>$null | Select-Object -First 1)
+    $lastCommitAt = @(& $git.Source -C $repoPath log -1 --format=%cI 2>$null | Select-Object -First 1)
+    $lastCommitSummary = @(& $git.Source -C $repoPath log -1 --format=%s 2>$null | Select-Object -First 1)
+    $repos.Add([ordered]@{
+        name = Split-Path -Path $repoPath -Leaf
+        path = [string]$repoPath
+        branch = if ($branchInfo.branch) { [string]$branchInfo.branch } else { $null }
+        remote = if ($remote) { [string]$remote[0] } else { $null }
+        dirty = ($stagedCount + $modifiedCount + $untrackedCount) -gt 0
+        ahead = $branchInfo.ahead
+        behind = $branchInfo.behind
+        stagedCount = $stagedCount
+        modifiedCount = $modifiedCount
+        untrackedCount = $untrackedCount
+        lastCommitAt = if ($lastCommitAt) { [string]$lastCommitAt[0] } else { $null }
+        lastCommitSummary = if ($lastCommitSummary) { [string]$lastCommitSummary[0] } else { $null }
+      }) | Out-Null
+  }
+
+  return [ordered]@{
+    generatedAt = Get-IsoNow
+    roots = @($Roots)
+    repoCount = $repos.Count
+    skippedRoots = $skippedRoots.ToArray()
+    repos = @($repos.ToArray() | Sort-Object name)
   }
 }
 
@@ -1099,6 +1532,8 @@ Write-RefreshStatus `
       windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
       plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
       plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+      fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+      repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
     })
 
 try {
@@ -1107,6 +1542,46 @@ try {
   $uptimeSpan = (Get-Date) - $bootTime
   $uptimeText = "{0}d {1}h {2}m" -f [Math]::Floor($uptimeSpan.TotalDays), $uptimeSpan.Hours, $uptimeSpan.Minutes
   $resources = Get-HostResourceSnapshot -OperatingSystem $os
+  $services = @(Get-WindowsServiceSnapshot)
+  $scheduledTasks = @(Get-ScheduledTaskSnapshot)
+  $listeningPorts = @(Get-ListeningPortsSnapshot -Services $services)
+
+  $fileIndexRoots = Resolve-ConfiguredPaths -RawValue $env:FILE_INDEX_ROOTS -DefaultRelativePaths @("notes")
+  $rawFileExtensions = if (-not [string]::IsNullOrWhiteSpace($env:FILE_INDEX_TEXT_EXTENSIONS)) {
+    @(
+      $env:FILE_INDEX_TEXT_EXTENSIONS -split "[;\r\n,]+" |
+        ForEach-Object { $_.Trim().ToLowerInvariant() } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        ForEach-Object { if ($_.StartsWith(".")) { $_ } else { ".$_" } }
+    )
+  } else {
+    @(".md", ".txt", ".json", ".yaml", ".yml", ".log", ".ps1", ".ts", ".js", ".tsx", ".jsx")
+  }
+  $fileMaxFiles = 500
+  if (-not [string]::IsNullOrWhiteSpace($env:FILE_INDEX_MAX_FILES)) {
+    $parsedFileMax = 0
+    if ([int]::TryParse($env:FILE_INDEX_MAX_FILES, [ref]$parsedFileMax) -and $parsedFileMax -gt 0) {
+      $fileMaxFiles = $parsedFileMax
+    }
+  }
+  $filePreviewChars = 2000
+  if (-not [string]::IsNullOrWhiteSpace($env:FILE_INDEX_PREVIEW_CHARS)) {
+    $parsedPreviewChars = 0
+    if ([int]::TryParse($env:FILE_INDEX_PREVIEW_CHARS, [ref]$parsedPreviewChars) -and $parsedPreviewChars -gt 0) {
+      $filePreviewChars = $parsedPreviewChars
+    }
+  }
+  $fileCatalogSnapshot = Get-FileCatalogSnapshot -Roots $fileIndexRoots -TextExtensions $rawFileExtensions -MaxFiles $fileMaxFiles -PreviewChars $filePreviewChars
+
+  $repoScanRoots = Resolve-ConfiguredPaths -RawValue $env:REPO_SCAN_ROOTS -DefaultRelativePaths @(".")
+  $repoScanMaxDepth = 4
+  if (-not [string]::IsNullOrWhiteSpace($env:REPO_SCAN_MAX_DEPTH)) {
+    $parsedRepoDepth = 0
+    if ([int]::TryParse($env:REPO_SCAN_MAX_DEPTH, [ref]$parsedRepoDepth) -and $parsedRepoDepth -ge 0) {
+      $repoScanMaxDepth = $parsedRepoDepth
+    }
+  }
+  $repoStatusSnapshot = Get-RepoStatusSnapshot -Roots $repoScanRoots -MaxDepth $repoScanMaxDepth
 
   $dockerProcesses = Get-ProcessNames -Names @("Docker Desktop", "com.docker.backend", "docker-agent", "docker-sandbox")
   $dockerServices = Convert-ServiceState -Names @("com.docker.service")
@@ -1321,6 +1796,9 @@ try {
     }
     resources = $resources
     components = $components
+    services = $services
+    scheduledTasks = $scheduledTasks
+    listeningPorts = $listeningPorts
     docker = [ordered]@{
       available = ($null -ne $dockerCommand)
       cliVersion = $dockerCliVersion
@@ -1350,6 +1828,8 @@ try {
 
   Write-JsonAtomic -Path $hostStatusPath -Value $payload -Depth 8
   Write-JsonAtomic -Path $plexActivityPath -Value $plexActivitySnapshot -Depth 8
+  Write-JsonAtomic -Path $fileCatalogPath -Value $fileCatalogSnapshot -Depth 8
+  Write-JsonAtomic -Path $repoStatusPath -Value $repoStatusSnapshot -Depth 8
 
   $completedAt = Get-IsoNow
   $durationSeconds = (([DateTimeOffset]::Parse($completedAt)) - ([DateTimeOffset]::Parse($refreshStartedAt))).TotalSeconds
@@ -1357,6 +1837,8 @@ try {
     windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath -SourceTimestamp $payload.generatedAt
     plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath -SourceTimestamp $(if ($plexIndexSummary) { [string]$plexIndexSummary.generatedAt } else { $null })
     plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath -SourceTimestamp $(if ($plexActivitySnapshot) { [string]$plexActivitySnapshot.fetchedAt } else { $null })
+    fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath -SourceTimestamp $fileCatalogSnapshot.generatedAt
+    repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath -SourceTimestamp $repoStatusSnapshot.generatedAt
   }
 
   Write-RefreshStatus `
@@ -1387,6 +1869,8 @@ try {
     Write-Host "Wrote Plex library index to $plexIndexPath"
   }
   Write-Host "Wrote Plex activity snapshot to $plexActivityPath"
+  Write-Host "Wrote file catalog snapshot to $fileCatalogPath"
+  Write-Host "Wrote repo status snapshot to $repoStatusPath"
   Write-Host "Wrote snapshot status to $snapshotStatusPath"
 } catch {
   $message = if ($_.Exception) { $_.Exception.Message } else { $_.ToString() }
@@ -1407,6 +1891,8 @@ try {
         windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
         plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
         plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+        fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+        repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
       })
 
   Append-RefreshHistory -Path $snapshotHistoryPath -Entry ([ordered]@{
@@ -1422,6 +1908,8 @@ try {
         windowsHostStatus = Get-RefreshOutputSummary -Path $hostStatusPath
         plexLibraryIndex = Get-RefreshOutputSummary -Path $plexIndexPath
         plexActivity = Get-RefreshOutputSummary -Path $plexActivityPath
+        fileCatalog = Get-RefreshOutputSummary -Path $fileCatalogPath
+        repoStatus = Get-RefreshOutputSummary -Path $repoStatusPath
       }
     })
 

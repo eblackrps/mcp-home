@@ -94,6 +94,10 @@ async function main() {
     let hostResourcesText = "";
     let dockerTriageText = "";
     let hostFindText = "";
+    let attentionText = "";
+    let windowsServicesText = "";
+    let fileSearchText = "";
+    let repoStatusText = "";
     if (toolNames.includes("get_docker_port_map")) {
       const dockerPorts = await client.callTool({
         name: "get_docker_port_map",
@@ -121,6 +125,34 @@ async function main() {
         arguments: { query: "memory", limit: 3 }
       });
       hostFindText = getFirstText(hostFind.content);
+    }
+    if (toolNames.includes("get_attention_report")) {
+      const attention = await client.callTool({
+        name: "get_attention_report",
+        arguments: {}
+      });
+      attentionText = getFirstText(attention.content);
+    }
+    if (toolNames.includes("list_windows_services")) {
+      const services = await client.callTool({
+        name: "list_windows_services",
+        arguments: { query: "docker", limit: 5 }
+      });
+      windowsServicesText = getFirstText(services.content);
+    }
+    if (toolNames.includes("search_files")) {
+      const fileSearch = await client.callTool({
+        name: "search_files",
+        arguments: { query: "homelab", limit: 5 }
+      });
+      fileSearchText = getFirstText(fileSearch.content);
+    }
+    if (toolNames.includes("get_repo_status")) {
+      const repoStatus = await client.callTool({
+        name: "get_repo_status",
+        arguments: { query: "MCP@home" }
+      });
+      repoStatusText = getFirstText(repoStatus.content);
     }
 
     if (!plexText.toLowerCase().includes("sopranos")) {
@@ -167,6 +199,22 @@ async function main() {
       throw new Error("find_host did not return the expected host match");
     }
 
+    if (toolNames.includes("get_attention_report") && !attentionText.includes("Attention report")) {
+      throw new Error("get_attention_report did not return the expected attention summary");
+    }
+
+    if (toolNames.includes("list_windows_services") && !windowsServicesText.includes("Windows services")) {
+      throw new Error("list_windows_services did not return the expected Windows service summary");
+    }
+
+    if (toolNames.includes("search_files") && !fileSearchText.includes("File search")) {
+      throw new Error("search_files did not return the expected indexed file summary");
+    }
+
+    if (toolNames.includes("get_repo_status") && !repoStatusText.includes("Repo status")) {
+      throw new Error("get_repo_status did not return the expected repo status summary");
+    }
+
     console.log(
       JSON.stringify(
         {
@@ -182,6 +230,10 @@ async function main() {
           homePreview: homeText.slice(0, 120),
           hostResourcesPreview: hostResourcesText.slice(0, 120),
           hostFindPreview: hostFindText.slice(0, 120),
+          attentionPreview: attentionText.slice(0, 120),
+          windowsServicesPreview: windowsServicesText.slice(0, 120),
+          fileSearchPreview: fileSearchText.slice(0, 120),
+          repoStatusPreview: repoStatusText.slice(0, 120),
           dockerTriagePreview: dockerTriageText.slice(0, 120),
           portPreview: portText.slice(0, 120)
         },

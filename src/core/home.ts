@@ -1,8 +1,10 @@
+import { formatFileSearchResults, readFileCatalogSnapshot, searchFiles } from "./files.js";
 import { formatHomelabStatus, readHomelabStatus } from "./homelab.js";
 import { formatDockerFind, formatHostFind, readWindowsHostStatus } from "./host.js";
 import { loadAllNotes, readNoteBySlug, searchNotes } from "./notes.js";
 import { findPlex, formatPlexFind, readPlexLibraryIndex } from "./plex.js";
 import { readPlexActivitySnapshot } from "./plex-activity.js";
+import { formatLocalRepos, readRepoStatusSnapshot } from "./repos.js";
 import { formatSnapshotHeadline, readSnapshotOverview } from "./snapshots.js";
 import type { ToolProfile } from "./server-meta.js";
 
@@ -68,14 +70,99 @@ export async function formatOperationsDashboard(notesDir: string) {
   return formatOperationsDashboardForProfile(notesDir, "full");
 }
 
+export async function formatAttentionReport(profile: ToolProfile) {
+  const [snapshotOverview, hostStatus] = await Promise.all([readSnapshotOverview(), readWindowsHostStatus()]);
+  const repoSnapshot = profile === "full" ? await readRepoStatusSnapshot().catch(() => null) : null;
+  const staleSnapshots = snapshotOverview.files.filter((file) => file.freshness === "stale" || file.freshness === "missing");
+  const lateSnapshots = snapshotOverview.files.filter((file) => file.freshness === "late");
+  const serviceIssues = (hostStatus.services ?? []).filter((service) => {
+    const startMode = service.startMode?.toLowerCase() ?? "";
+    return service.state.toLowerCase() !== "running" && (startMode === "auto" || startMode === "automatic");
+  });
+  const failedTasks = (hostStatus.scheduledTasks ?? []).filter((task) => (task.lastTaskResult ?? 0) !== 0);
+  const dockerProblems = hostStatus.docker?.problemCount ?? 0;
+  const dirtyRepos = repoSnapshot ? repoSnapshot.repos.filter((repo) => repo.dirty) : [];
+  const lines = ["Attention report:", "", formatSnapshotHeadline(snapshotOverview), ""];
+
+  if (staleSnapshots.length === 0 && lateSnapshots.length === 0 && dockerProblems === 0 && serviceIssues.length === 0 && failedTasks.length === 0 && dirtyRepos.length === 0) {
+    lines.push("- No urgent attention items were found in the latest snapshots.");
+    return lines.join("\n");
+  }
+
+  if (staleSnapshots.length > 0) {
+    lines.push("Stale snapshots:");
+    for (const snapshot of staleSnapshots) {
+      lines.push(`- ${snapshot.label} | ${snapshot.freshness}`);
+    }
+    lines.push("");
+  } else if (lateSnapshots.length > 0) {
+    lines.push("Late snapshots:");
+    for (const snapshot of lateSnapshots) {
+      lines.push(`- ${snapshot.label} | ${snapshot.freshness}`);
+    }
+    lines.push("");
+  }
+
+  if (dockerProblems > 0) {
+    lines.push(`Docker problems: ${dockerProblems}`);
+    lines.push("- Review get_docker_issues or get_docker_triage_report.");
+    lines.push("");
+  }
+
+  if (serviceIssues.length > 0) {
+    lines.push(`Stopped automatic services: ${serviceIssues.length}`);
+    for (const service of serviceIssues.slice(0, 10)) {
+      lines.push(`- ${service.displayName} (${service.name}) | ${service.state}`);
+    }
+    lines.push("");
+  }
+
+  if (failedTasks.length > 0) {
+    lines.push(`Failed scheduled tasks: ${failedTasks.length}`);
+    for (const task of failedTasks.slice(0, 10)) {
+      lines.push(`- ${task.path}${task.name} | last result ${task.lastTaskResult}`);
+    }
+    lines.push("");
+  }
+
+  if (dirtyRepos.length > 0) {
+    lines.push(`Dirty repos: ${dirtyRepos.length}`);
+    for (const repo of dirtyRepos.slice(0, 10)) {
+      lines.push(`- ${repo.name} | staged ${repo.stagedCount} | modified ${repo.modifiedCount} | untracked ${repo.untrackedCount}`);
+    }
+    lines.push("");
+  }
+
+  lines.push("Recommended next checks:");
+  if (staleSnapshots.length > 0 || lateSnapshots.length > 0) {
+    lines.push('- Run "npm run refresh:host" if the data looks old, and use get_snapshot_recommendations if it stays stale.');
+  }
+  if (serviceIssues.length > 0) {
+    lines.push("- Use get_windows_service_issues or get_windows_service_details for the affected services.");
+  }
+  if (failedTasks.length > 0) {
+    lines.push("- Use find_failed_tasks or get_scheduled_task_details to inspect the task failures.");
+  }
+  if (dirtyRepos.length > 0) {
+    lines.push("- Use list_local_repos or get_repo_status to review repo changes.");
+  }
+  if (dockerProblems > 0) {
+    lines.push("- Use get_docker_issues or get_docker_restart_report to inspect Docker failures.");
+  }
+
+  return lines.join("\n");
+}
+
 export async function formatOperationsDashboardForProfile(notesDir: string, profile: ToolProfile) {
   const checkedAt = new Date().toISOString();
   const snapshotOverview = await readSnapshotOverview();
-  const [hostResult, activityResult, notesResult, homelabResult] = await Promise.allSettled([
+  const [hostResult, activityResult, notesResult, homelabResult, fileResult, repoResult] = await Promise.allSettled([
     readWindowsHostStatus(),
     readPlexActivitySnapshot(),
     loadAllNotes(notesDir),
-    readHomelabStatus()
+    readHomelabStatus(),
+    readFileCatalogSnapshot(),
+    readRepoStatusSnapshot()
   ]);
 
   const lines = [
@@ -151,6 +238,19 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
         `Homelab: unavailable | ${homelabResult.reason instanceof Error ? homelabResult.reason.message : String(homelabResult.reason)}`
       );
     }
+
+    if (fileResult.status === "fulfilled") {
+      lines.push(`Files: ${fileResult.value.indexedFileCount} indexed across ${fileResult.value.roots.length} roots`);
+    } else {
+      lines.push(`Files: unavailable | ${fileResult.reason instanceof Error ? fileResult.reason.message : String(fileResult.reason)}`);
+    }
+
+    if (repoResult.status === "fulfilled") {
+      const dirtyRepos = repoResult.value.repos.filter((repo) => repo.dirty).length;
+      lines.push(`Repos: ${repoResult.value.repoCount} indexed | ${dirtyRepos} dirty`);
+    } else {
+      lines.push(`Repos: unavailable | ${repoResult.reason instanceof Error ? repoResult.reason.message : String(repoResult.reason)}`);
+    }
   }
 
   const actions: string[] = [];
@@ -163,6 +263,9 @@ export async function formatOperationsDashboardForProfile(notesDir: string, prof
   }
   if (hostResult.status === "fulfilled" && (hostResult.value.docker?.problemCount ?? 0) > 0) {
     actions.push("Review Docker issues with get_docker_issues or get_docker_restart_report.");
+  }
+  if (repoResult.status === "fulfilled" && repoResult.value.repos.some((repo) => repo.dirty)) {
+    actions.push("Use list_local_repos or get_repo_status to review dirty repositories.");
   }
 
   if (actions.length > 0) {
@@ -180,7 +283,7 @@ export async function formatHomeFind(
   notesDir: string,
   options: {
     query: string;
-    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host";
+    area?: "auto" | "docker" | "plex" | "notes" | "homelab" | "host" | "files" | "repos";
     limit?: number;
     profile?: ToolProfile;
   }
@@ -192,6 +295,8 @@ export async function formatHomeFind(
   const notesAllowed = profile === "full";
   const homelabAllowed = profile === "full";
   const hostAllowed = profile === "full";
+  const fileAllowed = profile === "full";
+  const repoAllowed = profile === "full";
 
   if (!query) {
     return "Home finder:\n\n- A non-empty search query is required.";
@@ -236,6 +341,27 @@ export async function formatHomeFind(
     return lines.join("\n");
   }
 
+  if (area === "files") {
+    if (!fileAllowed) {
+      lines.push('- File search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const snapshot = await readFileCatalogSnapshot();
+    const results = searchFiles(snapshot, { query, limit });
+    lines.push(formatFileSearchResults(snapshot, results, { query, limit }));
+    return lines.join("\n");
+  }
+
+  if (area === "repos") {
+    if (!repoAllowed) {
+      lines.push('- Repo search is not available in the current public-safe tool profile.');
+      return lines.join("\n");
+    }
+    const snapshot = await readRepoStatusSnapshot();
+    lines.push(formatLocalRepos(snapshot, { query, limit }));
+    return lines.join("\n");
+  }
+
   if (area === "homelab") {
     if (!homelabAllowed) {
       lines.push('- Homelab search is not available in the current public-safe tool profile.');
@@ -258,11 +384,13 @@ export async function formatHomeFind(
     return lines.join("\n");
   }
 
-  const [hostStatus, plexIndex, noteText, homelabStatus] = await Promise.all([
+  const [hostStatus, plexIndex, noteText, homelabStatus, fileSnapshot, repoSnapshot] = await Promise.all([
     readWindowsHostStatus(),
     readPlexLibraryIndex(),
     notesAllowed ? formatNotesFind(notesDir, query, limit) : Promise.resolve(""),
-    homelabAllowed ? readHomelabStatus() : Promise.resolve(null)
+    homelabAllowed ? readHomelabStatus() : Promise.resolve(null),
+    fileAllowed ? readFileCatalogSnapshot() : Promise.resolve(null),
+    repoAllowed ? readRepoStatusSnapshot() : Promise.resolve(null)
   ]);
 
   const dockerText = formatDockerFind(hostStatus, { query, limit });
@@ -278,6 +406,11 @@ export async function formatHomeFind(
           );
         })
       : [];
+  const fileText =
+    fileAllowed && fileSnapshot
+      ? formatFileSearchResults(fileSnapshot, searchFiles(fileSnapshot, { query, limit }), { query, limit })
+      : "";
+  const repoText = repoAllowed && repoSnapshot ? formatLocalRepos(repoSnapshot, { query, limit }) : "";
 
   if (hasPlexResults(plexResult)) {
     lines.push("Plex:");
@@ -293,7 +426,7 @@ export async function formatHomeFind(
 
   if (hostAllowed) {
     const hostText = formatHostFind(hostStatus, { query, limit });
-    if (!hostText.includes("- No host components, resources, disks, or network adapters matched that query.")) {
+    if (!hostText.includes("- No host components, resources, disks, network adapters, services, scheduled tasks, or listening ports matched that query.")) {
       lines.push("Host:");
       lines.push(hostText);
       lines.push("");
@@ -306,6 +439,18 @@ export async function formatHomeFind(
     lines.push("");
   }
 
+  if (fileAllowed && fileText && !fileText.includes("- No indexed files matched that search.")) {
+    lines.push("Files:");
+    lines.push(fileText);
+    lines.push("");
+  }
+
+  if (repoAllowed && repoText && !repoText.includes("- No local repos matched that filter.")) {
+    lines.push("Repos:");
+    lines.push(repoText);
+    lines.push("");
+  }
+
   if (homelabAllowed && homelabStatus && homelabMatches.length > 0) {
     lines.push("Homelab:");
     lines.push(formatHomelabStatus({ ...homelabStatus, services: homelabMatches }, undefined));
@@ -313,7 +458,7 @@ export async function formatHomeFind(
   }
 
   if (lines.length <= 3) {
-    lines.push("- No Plex, Docker, host, note, or homelab matches were found for that query.");
+    lines.push("- No Plex, Docker, host, file, repo, note, or homelab matches were found for that query.");
   }
 
   return lines.join("\n").trimEnd();
